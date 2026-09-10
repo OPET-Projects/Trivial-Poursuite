@@ -20,7 +20,12 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 def model_slug(model_name: str) -> str:
     """Nom de modèle transformé en segment de chemin sûr."""
-    return _UNSAFE.sub("_", model_name).strip("_")
+    slug = _UNSAFE.sub("_", model_name).strip("_")
+    if slug in ("", ".", ".."):
+        raise ValueError(
+            f"Nom de modèle inexploitable comme segment de chemin: {model_name!r}"
+        )
+    return slug
 
 
 def _cpu_brand() -> str:

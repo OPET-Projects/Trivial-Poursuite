@@ -1,5 +1,7 @@
 import re
 
+import pytest
+
 from src.runmeta import host_info, model_slug, new_run_id
 
 
@@ -26,3 +28,9 @@ def test_new_run_id_is_sortable_and_unique():
     first, second = new_run_id(), new_run_id()
     assert re.match(r"^\d{8}T\d{6}Z-[0-9a-f]{6}$", first)
     assert first != second
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "///", ".", ".."])
+def test_model_slug_rejects_unusable_names(bad):
+    with pytest.raises(ValueError):
+        model_slug(bad)
