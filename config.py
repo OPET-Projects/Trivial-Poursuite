@@ -1,4 +1,4 @@
-"""Paramètres globaux du pipeline Trivial Pursuit."""
+"""Paramètres globaux du pipeline Trivial Poursuite."""
 
 from pathlib import Path
 

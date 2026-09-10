@@ -1,4 +1,4 @@
-# Trivial Pursuit — Benchmark LLM (OpenTDB)
+# Trivial Poursuite — Benchmark LLM (OpenTDB)
 
 Pipeline Python de data engineering pour évaluer un modèle local (LM Studio) sur des questions de culture générale.
 
