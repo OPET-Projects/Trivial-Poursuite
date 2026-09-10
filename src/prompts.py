@@ -45,7 +45,7 @@ def _lettered_options(choices: Sequence) -> list[str]:
     Le mélange est seedé par `question_id` en amont, dans l'étage silver.
     L'ordre reçu ici fait foi : la lettre encode la position stockée.
     """
-    if not choices:
+    if len(choices) == 0:
         raise ValueError("Une question contrainte doit proposer au moins une option.")
     if len(choices) > len(_CHOICE_LETTERS):
         raise ValueError(f"Trop d'options pour un lettrage A-Z : {len(choices)}.")
