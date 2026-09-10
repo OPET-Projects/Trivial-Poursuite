@@ -1,0 +1,109 @@
+# Review package: 47c4f9f..HEAD
+
+## Commits
+41881e8 fix: écarter les propositions en doublon et durcir la détection numérique
+
+## Files changed
+ src/transform_silver.py        | 13 +++++++++++--
+ tests/test_transform_silver.py | 24 ++++++++++++++++++++++++
+ 2 files changed, 35 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/src/transform_silver.py b/src/transform_silver.py
+index 2f328dc..132ab62 100644
+--- a/src/transform_silver.py
++++ b/src/transform_silver.py
+@@ -21,21 +21,21 @@ from pathlib import Path
+ import pandas as pd
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ if str(ROOT) not in sys.path:
+     sys.path.insert(0, str(ROOT))
+ 
+ import config
+ from src.io_utils import atomic_write_dataframe
+ 
+ _SPACES = re.compile(r"\s+")
+-_NUMERIC = re.compile(r"^[\d\s.,%/+-]+$")
++_NUMERIC = re.compile(r"^(?=.*\d)[\d\s.,%/+-]+$")
+ 
+ SILVER_COLUMNS = [
+     "question_id",
+     "category",
+     "category_group",
+     "category_name",
+     "type",
+     "difficulty",
+     "question",
+     "correct_answer",
+@@ -82,21 +82,30 @@ def parse_incorrect(value: object) -> list[str]:
+     try:
+         parsed = json.loads(text)
+     except json.JSONDecodeError:
+         parsed = ast.literal_eval(text)
+     if not isinstance(parsed, list):
+         return [unescape_text(parsed)]
+     return [unescape_text(item) for item in parsed]
+ 
+ 
+ def shuffled_choices(question_id: str, correct: str, incorrect: list[str]) -> list[str]:
+-    choices = [correct, *incorrect]
++    """Ordre reproductible et décorrélé du contenu.
++
++    Les propositions en doublon exact sont écartées : OpenTDB contient des
++    lignes où une mauvaise réponse reprend mot pour mot la bonne, ce qui
++    rendrait `correct_answer_position` ambigu.
++    """
++    choices = [correct]
++    for answer in incorrect:
++        if answer not in choices:
++            choices.append(answer)
+     random.Random(question_id).shuffle(choices)
+     return choices
+ 
+ 
+ def normalize_answer(value: str) -> str:
+     import unicodedata
+ 
+     text = unicodedata.normalize("NFKD", value)
+     text = "".join(char for char in text if not unicodedata.combining(char))
+     text = re.sub(r"[^\w\s]", " ", text.casefold())
+diff --git a/tests/test_transform_silver.py b/tests/test_transform_silver.py
+index fda7de4..9f04272 100644
+--- a/tests/test_transform_silver.py
++++ b/tests/test_transform_silver.py
+@@ -84,10 +84,34 @@ def test_non_numeric_answer_is_not_flagged():
+ 
+ 
+ def test_rows_without_question_are_dropped():
+     frame = pd.concat([bronze_frame(), bronze_frame(question="", question_id="zzz")], ignore_index=True)
+     assert len(clean_questions(frame)) == 1
+ 
+ 
+ def test_duplicate_question_ids_are_dropped():
+     frame = pd.concat([bronze_frame(), bronze_frame()], ignore_index=True)
+     assert len(clean_questions(frame)) == 1
++
++
++def test_duplicate_answers_are_collapsed():
++    cleaned = clean_questions(
++        bronze_frame(incorrect_answers=json.dumps(["Steven Spielberg", "George Lucas", "George Lucas"]))
++    )
++    choices = list(cleaned.loc[0, "choices"])
++    assert sorted(choices) == ["George Lucas", "Steven Spielberg"]
++    assert cleaned.loc[0, "n_choices"] == 2
++
++
++def test_correct_answer_appears_exactly_once_despite_duplicates():
++    cleaned = clean_questions(
++        bronze_frame(incorrect_answers=json.dumps(["Steven Spielberg", "Ridley Scott"]))
++    )
++    choices = list(cleaned.loc[0, "choices"])
++    assert choices.count("Steven Spielberg") == 1
++    position = cleaned.loc[0, "correct_answer_position"]
++    assert choices[position] == "Steven Spielberg"
++
++
++def test_punctuation_only_answer_is_not_numeric():
++    cleaned = clean_questions(bronze_frame(correct_answer="-"))
++    assert bool(cleaned.loc[0, "answer_is_numeric"]) is False

@@ -1,0 +1,123 @@
+# Review package: 6a71aad..HEAD
+
+## Commits
+dd92d08 fix: faire entrer la consigne booléenne dans l'empreinte des prompts
+
+## Files changed
+ src/prompts.py        | 17 +++++++++++++----
+ tests/test_prompts.py | 22 ++++++++++++++++++++++
+ 2 files changed, 35 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/src/prompts.py b/src/prompts.py
+index 43e3425..5395fcb 100644
+--- a/src/prompts.py
++++ b/src/prompts.py
+@@ -3,21 +3,21 @@
+ L'écart p1 / p3 mesure la différence entre reconnaître une réponse parmi
+ des options et la restituer librement. L'écart p2 / p3 isole l'apport de
+ l'ingénierie de prompt à mode d'interrogation constant.
+ 
+ Les prompts restent en anglais, comme le corpus OpenTDB.
+ """
+ 
+ from __future__ import annotations
+ 
+ import hashlib
+-from dataclasses import dataclass
++from dataclasses import dataclass, field
+ from typing import Callable, Mapping
+ 
+ _CONSTRAINED_SYSTEM = (
+     "You are a trivia answering engine. "
+     "Reply with the answer only. "
+     "No explanation, no extra punctuation, no markdown, no quotes. "
+     "Copy one of the given options verbatim."
+ )
+ 
+ _MINIMAL_SYSTEM = "You are a trivia answering engine. Answer with the answer only."
+@@ -61,35 +61,44 @@ def _guided_user(row: Mapping) -> str:
+         f"{instruction}\n"
+         "Answer:"
+     )
+ 
+ 
+ @dataclass(frozen=True)
+ class PromptVariant:
+     variant_id: str
+     mode: str
+     system_prompt: str
+-    _builder: Callable[[Mapping], str]
++    _builder: Callable[[Mapping], str] = field(repr=False, compare=False)
+ 
+     def build_user_prompt(self, question_row: Mapping) -> str:
+         return self._builder(question_row)
+ 
+     @property
+     def prompt_hash(self) -> str:
+-        probe = {
++        """Empreinte du gabarit, stockée à chaque ligne de résultat.
++
++        Les deux types de question sont rendus : les variantes ouvertes
++        produisent une consigne différente pour les booléens, et une dérive
++        de ce texte doit changer l'empreinte.
++        """
++        probe_multiple = {
+             "question": "<probe>",
+             "category": "<category>",
+             "difficulty": "<difficulty>",
+             "type": "multiple",
+             "choices": ["<a>", "<b>"],
+         }
+-        payload = f"{self.system_prompt}␟{self._builder(probe)}".encode("utf-8")
++        probe_boolean = {**probe_multiple, "type": "boolean", "choices": ["True", "False"]}
++        payload = "␟".join(
++            [self.system_prompt, self._builder(probe_multiple), self._builder(probe_boolean)]
++        ).encode("utf-8")
+         return hashlib.sha256(payload).hexdigest()[:12]
+ 
+ 
+ PROMPT_VARIANTS: dict[str, PromptVariant] = {
+     "p1_constrained_mcq": PromptVariant(
+         "p1_constrained_mcq", "constrained", _CONSTRAINED_SYSTEM, _constrained_user
+     ),
+     "p2_open_minimal": PromptVariant(
+         "p2_open_minimal", "open", _MINIMAL_SYSTEM, _minimal_user
+     ),
+diff --git a/tests/test_prompts.py b/tests/test_prompts.py
+index 9d9cfdb..de8ab3f 100644
+--- a/tests/test_prompts.py
++++ b/tests/test_prompts.py
+@@ -55,10 +55,32 @@ def test_modes_are_declared():
+ 
+ def test_prompt_hash_is_stable_and_distinct():
+     hashes = {v.variant_id: v.prompt_hash for v in PROMPT_VARIANTS.values()}
+     assert len(set(hashes.values())) == 3
+     assert get_variant("p1_constrained_mcq").prompt_hash == hashes["p1_constrained_mcq"]
+ 
+ 
+ def test_unknown_variant_raises():
+     with pytest.raises(KeyError):
+         get_variant("nope")
++
++
++def test_prompt_hash_covers_the_boolean_branch(monkeypatch):
++    """Une dérive de la consigne booléenne doit changer l'empreinte."""
++    variant = get_variant("p3_open_guided")
++    before = variant.prompt_hash
++    original = variant._builder
++
++    def drifted(row):
++        text = original(row)
++        return text.replace("True or False", "True / False") if row["type"] == "boolean" else text
++
++    object.__setattr__(variant, "_builder", drifted)
++    try:
++        assert variant.prompt_hash != before
++    finally:
++        object.__setattr__(variant, "_builder", original)
++
++
++def test_prompt_hash_is_unchanged_by_repeated_access():
++    variant = get_variant("p1_constrained_mcq")
++    assert variant.prompt_hash == variant.prompt_hash
