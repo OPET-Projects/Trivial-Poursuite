@@ -4,6 +4,11 @@ L'écart p1 / p3 mesure la différence entre reconnaître une réponse parmi
 des options et la restituer librement. L'écart p2 / p3 isole l'apport de
 l'ingénierie de prompt à mode d'interrogation constant.
 
+En p1 les options sont lettrées et le modèle répond par la lettre seule :
+une lettre est un jeton unique et non ambigu, là où la recopie verbatim
+échouait sur la moindre variation de casse ou de ponctuation. La lettre est
+résolue contre `choices` par l'étage `choice_letter` de la cascade.
+
 Les prompts restent en anglais, comme le corpus OpenTDB.
 """
 
@@ -11,13 +16,15 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
+
+_CHOICE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 _CONSTRAINED_SYSTEM = (
     "You are a trivia answering engine. "
-    "Reply with the answer only. "
-    "No explanation, no extra punctuation, no markdown, no quotes. "
-    "Copy one of the given options verbatim."
+    "Every question comes with lettered options. "
+    "Reply with the letter of the correct option and nothing else. "
+    "No explanation, no option text, no extra punctuation, no markdown, no quotes."
 )
 
 _MINIMAL_SYSTEM = "You are a trivia answering engine. Answer with the answer only."
@@ -32,14 +39,27 @@ _GUIDED_SYSTEM = (
 )
 
 
+def _lettered_options(choices: Sequence) -> list[str]:
+    """Préfixe chaque option d'une lettre, dans l'ordre mélangé reçu.
+
+    Le mélange est seedé par `question_id` en amont, dans l'étage silver.
+    L'ordre reçu ici fait foi : la lettre encode la position stockée.
+    """
+    if not choices:
+        raise ValueError("Une question contrainte doit proposer au moins une option.")
+    if len(choices) > len(_CHOICE_LETTERS):
+        raise ValueError(f"Trop d'options pour un lettrage A-Z : {len(choices)}.")
+    return [f"{_CHOICE_LETTERS[i]}. {choice}" for i, choice in enumerate(choices)]
+
+
 def _constrained_user(row: Mapping) -> str:
-    options = "\n".join(f"- {choice}" for choice in row["choices"])
+    options = "\n".join(_lettered_options(row["choices"]))
     return (
         f"Category: {row['category']}\n"
         f"Difficulty: {row['difficulty']}\n"
         f"Question: {row['question']}\n"
         f"Options:\n{options}\n"
-        "Copy one option verbatim.\n"
+        "Reply with the letter of the correct option.\n"
         "Answer:"
     )
 

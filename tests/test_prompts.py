@@ -25,8 +25,35 @@ def test_three_variants_are_registered():
 
 def test_constrained_variant_lists_the_choices_in_order():
     prompt = get_variant("p1_constrained_mcq").build_user_prompt(MULTIPLE)
-    assert prompt.index("Raphael") < prompt.index("Leonardo da Vinci")
-    assert "Titian" in prompt
+    assert prompt.index("A. Raphael") < prompt.index("B. Leonardo da Vinci")
+    assert prompt.index("B. Leonardo da Vinci") < prompt.index("C. Titian")
+    assert "D. Donatello" in prompt
+
+
+def test_constrained_variant_letters_every_option():
+    """La lettre encode la position mélangée, elle doit suivre l'ordre reçu."""
+    prompt = get_variant("p1_constrained_mcq").build_user_prompt(MULTIPLE)
+    for letter, choice in zip("ABCD", MULTIPLE["choices"]):
+        assert f"{letter}. {choice}" in prompt
+
+
+def test_constrained_variant_asks_for_a_letter():
+    variant = get_variant("p1_constrained_mcq")
+    assert "letter" in variant.system_prompt
+    assert "letter" in variant.build_user_prompt(MULTIPLE)
+
+
+def test_constrained_variant_letters_boolean_options():
+    """Le lettrage s'applique aussi aux booléens : deux options, donc A et B."""
+    prompt = get_variant("p1_constrained_mcq").build_user_prompt(BOOLEAN)
+    assert "A. True" in prompt
+    assert "B. False" in prompt
+    assert "C." not in prompt
+
+
+def test_constrained_variant_rejects_an_empty_option_list():
+    with pytest.raises(ValueError):
+        get_variant("p1_constrained_mcq").build_user_prompt({**MULTIPLE, "choices": []})
 
 
 def test_open_variants_never_leak_the_choices():

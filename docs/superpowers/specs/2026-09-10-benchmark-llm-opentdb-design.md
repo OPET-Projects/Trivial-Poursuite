@@ -212,8 +212,14 @@ détectable a posteriori.
 Les prompts restent en anglais, comme le corpus.
 
 **`p1_constrained_mcq`** — QCM fermé. Les options sont fournies dans l'ordre
-mélangé, le modèle doit en recopier une mot pour mot. Mesure l'aptitude à la
-reconnaissance. Plancher de hasard : 25 % en `multiple`, 50 % en `boolean`.
+mélangé, préfixées d'une lettre (`A.`, `B.`, …), et le modèle répond par la
+lettre seule. Une lettre est un jeton unique, insensible aux variations de casse
+et de ponctuation qui faisaient échouer la recopie verbatim ; la lettre encode
+directement la position mélangée et est résolue contre `choices` par l'étage
+`choice_letter` de la cascade de jugement. Le lettrage s'applique aussi aux
+questions `boolean`, dont les deux propositions deviennent `A.` et `B.`. Mesure
+l'aptitude à la reconnaissance. Plancher de hasard : 25 % en `multiple`, 50 %
+en `boolean`.
 
 **`p2_open_minimal`** — question nue, sans options, instruction minimale
 (« Answer with the answer only. »). Mesure la restitution libre.
