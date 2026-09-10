@@ -105,9 +105,6 @@ class OpenTDBClient:
             raise RuntimeError(f"Token OpenTDB absent de la réponse: {payload}")
         return token
 
-    def reset_token(self, token: str) -> None:
-        self._get("api_token.php", {"command": "reset", "token": token})
-
     def categories(self) -> list[dict[str, Any]]:
         payload = self._get("api_category.php")
         categories = payload.get("trivia_categories") or []

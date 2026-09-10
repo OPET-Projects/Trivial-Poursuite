@@ -144,3 +144,30 @@ def test_rate_limiter_enforces_interval(monkeypatch):
     limiter.wait()
     limiter.wait()
     assert slept and pytest.approx(slept[-1], abs=0.01) == 5.1
+
+
+def test_categories_returns_the_list():
+    payload = {"trivia_categories": [{"id": 9, "name": "General Knowledge"}]}
+    session = FakeSession([FakeResponse(payload)])
+    client = OpenTDBClient(session=session, limiter=FakeLimiter())
+    assert client.categories() == [{"id": 9, "name": "General Knowledge"}]
+
+
+def test_categories_raises_when_empty():
+    session = FakeSession([FakeResponse({"trivia_categories": []})])
+    client = OpenTDBClient(session=session, limiter=FakeLimiter())
+    with pytest.raises(RuntimeError):
+        client.categories()
+
+
+def test_global_verified_count_reads_the_overall_block():
+    payload = {"overall": {"total_num_of_questions": 21617, "total_num_of_verified_questions": 5298}}
+    session = FakeSession([FakeResponse(payload)])
+    client = OpenTDBClient(session=session, limiter=FakeLimiter())
+    assert client.global_verified_count() == 5298
+
+
+def test_global_verified_count_defaults_to_zero_when_absent():
+    session = FakeSession([FakeResponse({})])
+    client = OpenTDBClient(session=session, limiter=FakeLimiter())
+    assert client.global_verified_count() == 0
