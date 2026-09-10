@@ -62,3 +62,25 @@ def test_prompt_hash_is_stable_and_distinct():
 def test_unknown_variant_raises():
     with pytest.raises(KeyError):
         get_variant("nope")
+
+
+def test_prompt_hash_covers_the_boolean_branch(monkeypatch):
+    """Une dérive de la consigne booléenne doit changer l'empreinte."""
+    variant = get_variant("p3_open_guided")
+    before = variant.prompt_hash
+    original = variant._builder
+
+    def drifted(row):
+        text = original(row)
+        return text.replace("True or False", "True / False") if row["type"] == "boolean" else text
+
+    object.__setattr__(variant, "_builder", drifted)
+    try:
+        assert variant.prompt_hash != before
+    finally:
+        object.__setattr__(variant, "_builder", original)
+
+
+def test_prompt_hash_is_unchanged_by_repeated_access():
+    variant = get_variant("p1_constrained_mcq")
+    assert variant.prompt_hash == variant.prompt_hash

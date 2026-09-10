@@ -10,7 +10,7 @@ Les prompts restent en anglais, comme le corpus OpenTDB.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
 _CONSTRAINED_SYSTEM = (
@@ -68,21 +68,30 @@ class PromptVariant:
     variant_id: str
     mode: str
     system_prompt: str
-    _builder: Callable[[Mapping], str]
+    _builder: Callable[[Mapping], str] = field(repr=False, compare=False)
 
     def build_user_prompt(self, question_row: Mapping) -> str:
         return self._builder(question_row)
 
     @property
     def prompt_hash(self) -> str:
-        probe = {
+        """Empreinte du gabarit, stockée à chaque ligne de résultat.
+
+        Les deux types de question sont rendus : les variantes ouvertes
+        produisent une consigne différente pour les booléens, et une dérive
+        de ce texte doit changer l'empreinte.
+        """
+        probe_multiple = {
             "question": "<probe>",
             "category": "<category>",
             "difficulty": "<difficulty>",
             "type": "multiple",
             "choices": ["<a>", "<b>"],
         }
-        payload = f"{self.system_prompt}␟{self._builder(probe)}".encode("utf-8")
+        probe_boolean = {**probe_multiple, "type": "boolean", "choices": ["True", "False"]}
+        payload = "␟".join(
+            [self.system_prompt, self._builder(probe_multiple), self._builder(probe_boolean)]
+        ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()[:12]
 
 
