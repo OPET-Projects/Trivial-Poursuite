@@ -123,9 +123,11 @@ class LLMClient:
     def complete(self, system_prompt: str, user_prompt: str) -> LLMResult:
         last_error = ""
         for attempt in range(1, config.LLM_MAX_ATTEMPTS + 1):
+            backend = self.backend  # résolution hors chronomètre : la construction
+                                     # paresseuse charge le modèle en mémoire
             started = time.perf_counter()
             try:
-                payload = self.backend.respond(system_prompt, user_prompt)
+                payload = backend.respond(system_prompt, user_prompt)
                 elapsed = time.perf_counter() - started
                 raw = str(payload.get("text") or "")
                 return LLMResult(

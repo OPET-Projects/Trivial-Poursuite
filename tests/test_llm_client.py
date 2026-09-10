@@ -1,5 +1,3 @@
-import pytest
-
 from src.llm_client import LLMClient, clean_answer
 
 
@@ -96,3 +94,26 @@ def test_raw_text_keeps_the_reasoning_for_audit():
     result = LLMClient("fake/model", backend=backend).complete("sys", "user")
     assert result.text == "Paris"
     assert REASONING_MARKER in result.raw_text
+
+
+def test_backend_construction_is_outside_the_timer():
+    """Le chargement du modèle ne doit pas être compté dans response_time."""
+    import time as _time
+
+    class SlowToBuildBackend:
+        def __init__(self):
+            _time.sleep(0.2)
+
+        def respond(self, system_prompt, user_prompt):
+            return {"text": "Paris"}
+
+    class LazyClient(LLMClient):
+        @property
+        def backend(self):
+            if self._backend is None:
+                self._backend = SlowToBuildBackend()
+            return self._backend
+
+    result = LazyClient("fake/model").complete("sys", "user")
+    assert result.status == "ok"
+    assert result.response_time < 0.15, "la construction du backend fuit dans le chronométrage"
