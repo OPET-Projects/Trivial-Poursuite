@@ -13,10 +13,12 @@ def test_paths_are_under_data_dir():
 
 def test_model_name_comes_from_environment(monkeypatch):
     monkeypatch.setenv("LLM_MODEL", "some/other-model")
-    reloaded = importlib.reload(config)
-    assert reloaded.MODEL_NAME == "some/other-model"
-    monkeypatch.delenv("LLM_MODEL")
-    importlib.reload(config)
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.MODEL_NAME == "some/other-model"
+    finally:
+        monkeypatch.delenv("LLM_MODEL")
+        importlib.reload(config)
 
 
 def test_amount_ladder_is_descending_and_ends_at_one():
