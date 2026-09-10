@@ -28,7 +28,7 @@ import config
 from src.io_utils import atomic_write_dataframe
 
 _SPACES = re.compile(r"\s+")
-_NUMERIC = re.compile(r"^[\d\s.,%/+-]+$")
+_NUMERIC = re.compile(r"^(?=.*\d)[\d\s.,%/+-]+$")
 
 SILVER_COLUMNS = [
     "question_id",
@@ -89,7 +89,16 @@ def parse_incorrect(value: object) -> list[str]:
 
 
 def shuffled_choices(question_id: str, correct: str, incorrect: list[str]) -> list[str]:
-    choices = [correct, *incorrect]
+    """Ordre reproductible et décorrélé du contenu.
+
+    Les propositions en doublon exact sont écartées : OpenTDB contient des
+    lignes où une mauvaise réponse reprend mot pour mot la bonne, ce qui
+    rendrait `correct_answer_position` ambigu.
+    """
+    choices = [correct]
+    for answer in incorrect:
+        if answer not in choices:
+            choices.append(answer)
     random.Random(question_id).shuffle(choices)
     return choices
 

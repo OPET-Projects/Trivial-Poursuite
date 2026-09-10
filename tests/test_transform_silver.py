@@ -91,3 +91,27 @@ def test_rows_without_question_are_dropped():
 def test_duplicate_question_ids_are_dropped():
     frame = pd.concat([bronze_frame(), bronze_frame()], ignore_index=True)
     assert len(clean_questions(frame)) == 1
+
+
+def test_duplicate_answers_are_collapsed():
+    cleaned = clean_questions(
+        bronze_frame(incorrect_answers=json.dumps(["Steven Spielberg", "George Lucas", "George Lucas"]))
+    )
+    choices = list(cleaned.loc[0, "choices"])
+    assert sorted(choices) == ["George Lucas", "Steven Spielberg"]
+    assert cleaned.loc[0, "n_choices"] == 2
+
+
+def test_correct_answer_appears_exactly_once_despite_duplicates():
+    cleaned = clean_questions(
+        bronze_frame(incorrect_answers=json.dumps(["Steven Spielberg", "Ridley Scott"]))
+    )
+    choices = list(cleaned.loc[0, "choices"])
+    assert choices.count("Steven Spielberg") == 1
+    position = cleaned.loc[0, "correct_answer_position"]
+    assert choices[position] == "Steven Spielberg"
+
+
+def test_punctuation_only_answer_is_not_numeric():
+    cleaned = clean_questions(bronze_frame(correct_answer="-"))
+    assert bool(cleaned.loc[0, "answer_is_numeric"]) is False
