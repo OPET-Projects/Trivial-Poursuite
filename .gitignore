@@ -15,7 +15,3 @@ data/bronze/*
 data/silver/*
 !data/bronze/.gitkeep
 !data/silver/.gitkeep
-
-# Documents de travail internes, non versionnés
-docs/superpowers/
-.superpowers/
