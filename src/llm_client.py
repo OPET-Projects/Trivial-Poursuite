@@ -21,12 +21,28 @@ import config
 
 _PREFIX = re.compile(r"^(answer|réponse)\s*[:\-]\s*", re.IGNORECASE)
 _WRAPPING_QUOTES = re.compile(r'^["\'`«»\s]+|["\'`«»\s]+$')
+_REASONING_END = re.compile(r"__LM_STUDIO_INTERNAL_LSEP_[A-Z_]*REASONING_END_[0-9a-f]+__")
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """Isole la réponse finale d'un modèle à raisonnement.
+
+    LM Studio insère un marqueur déterministe entre la réflexion et la
+    réponse; d'autres modèles encadrent leur réflexion de balises <think>.
+    Aucun prompt système ne supprime ce comportement de façon fiable, donc
+    il est traité ici plutôt qu'espéré.
+    """
+    without_blocks = _THINK_BLOCK.sub("", text)
+    parts = _REASONING_END.split(without_blocks)
+    return parts[-1] if parts else without_blocks
 
 
 def clean_answer(text: str) -> str:
     """Ramène une sortie de modèle à sa réponse nue."""
     if not text:
         return ""
+    text = strip_reasoning(text)
     first_line = text.strip().split("\n")[0]
     first_line = _PREFIX.sub("", first_line.strip())
     first_line = _WRAPPING_QUOTES.sub("", first_line)

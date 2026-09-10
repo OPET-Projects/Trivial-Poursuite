@@ -67,3 +67,32 @@ def test_missing_token_counts_become_none():
     result = LLMClient("fake/model", backend=backend).complete("sys", "user")
     assert result.prompt_tokens is None
     assert result.completion_tokens is None
+
+
+REASONING_MARKER = "__LM_STUDIO_INTERNAL_LSEP_SYNTHETIC_REASONING_END_f4e9a8d2c6b14d0c9e5f3a7b8c1d2e6a__"
+
+
+def test_clean_answer_keeps_only_what_follows_the_reasoning_marker():
+    raw = (
+        "The user is asking for the capital of France.\n"
+        "The capital of France is Paris.\n"
+        "The user requested \"Answer with the answer only.\""
+        + REASONING_MARKER
+        + "Paris"
+    )
+    assert clean_answer(raw) == "Paris"
+
+
+def test_clean_answer_strips_think_blocks():
+    assert clean_answer("<think>Let me recall.\nIt is in Europe.</think>\nParis") == "Paris"
+
+
+def test_clean_answer_is_unchanged_without_reasoning():
+    assert clean_answer("Paris") == "Paris"
+
+
+def test_raw_text_keeps_the_reasoning_for_audit():
+    backend = FakeBackend([{"text": "reasoning here" + REASONING_MARKER + "Paris"}])
+    result = LLMClient("fake/model", backend=backend).complete("sys", "user")
+    assert result.text == "Paris"
+    assert REASONING_MARKER in result.raw_text

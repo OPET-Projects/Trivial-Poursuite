@@ -43,7 +43,7 @@ MODEL_NAME = os.environ.get("LLM_MODEL", "google/gemma-4-12b-qat")
 JUDGE_MODEL_NAME = os.environ.get("JUDGE_MODEL", MODEL_NAME)
 LMSTUDIO_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "180"))
 LLM_TEMPERATURE = 0.0
-LLM_MAX_TOKENS = 64
+LLM_MAX_TOKENS = 256
 LLM_MAX_ATTEMPTS = 3
 
 # Écriture partitionnée
