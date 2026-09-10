@@ -1,9 +1,12 @@
 """Collecte intégrale OpenTDB vers la couche bronze.
 
-Piège central de l'API : le code 1 est renvoyé sans aucune question quand la
-catégorie contient moins de questions non servies que le nombre demandé.
-Demander systématiquement 50 perd donc la queue de chaque catégorie. On
-dégrade le montant demandé avant de conclure à l'épuisement.
+Piège central de l'API : quand la catégorie contient moins de questions non
+servies que le nombre demandé, elle répond sans aucune question — code 1
+(NO_RESULTS) ou, selon l'état du token, code 4 (TOKEN_EMPTY, observé en
+pratique alors même que des questions restent disponibles à un montant
+inférieur). Demander systématiquement 50 perd donc la queue de chaque
+catégorie. On dégrade le montant demandé sur ces deux codes avant de
+conclure à l'épuisement réel de la catégorie.
 """
 
 from __future__ import annotations
@@ -98,10 +101,7 @@ def fetch_category(
         if code == ResponseCode.RATE_LIMIT:
             continue
 
-        if code == ResponseCode.TOKEN_EMPTY:
-            break
-
-        if code == ResponseCode.NO_RESULTS:
+        if code in (ResponseCode.NO_RESULTS, ResponseCode.TOKEN_EMPTY):
             ladder_index += 1
             continue
 

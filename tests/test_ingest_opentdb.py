@@ -97,12 +97,28 @@ def test_category_of_137_returns_137_rows():
     assert len(rows) == 137
 
 
-def test_token_empty_stops_the_category_without_reset():
-    client = ScriptedClient(script=[(ResponseCode.SUCCESS, 50), (ResponseCode.TOKEN_EMPTY, 0)])
+def test_token_empty_degrades_the_amount_instead_of_stopping():
+    """Cas réel: l'API renvoie le code 4, pas le code 1, quand le reste est
+    inférieur au montant demandé. La catégorie 16 compte 78 questions."""
+    client = ScriptedClient(
+        script=[
+            (ResponseCode.SUCCESS, 50),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.SUCCESS, 25),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.SUCCESS, 1),
+            (ResponseCode.SUCCESS, 1),
+            (ResponseCode.SUCCESS, 1),
+            (ResponseCode.TOKEN_EMPTY, 0),
+        ]
+    )
     rows, token = fetch_category(client, "token-1", 9, set())
-    assert len(rows) == 50
-    assert token == "token-1"
+    assert len(rows) == 78
+    assert token == "token-1", "aucun token neuf ne doit être demandé sur un code 4"
     assert client.tokens_issued == 0
+    assert [call["amount"] for call in client.fetch_calls] == [50, 50, 25, 25, 10, 5, 1, 1, 1, 1]
 
 
 def test_token_not_found_requests_a_new_token_and_continues():
@@ -110,6 +126,10 @@ def test_token_not_found_requests_a_new_token_and_continues():
         script=[
             (ResponseCode.TOKEN_NOT_FOUND, 0),
             (ResponseCode.SUCCESS, 10),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
             (ResponseCode.TOKEN_EMPTY, 0),
         ]
     )
@@ -125,16 +145,28 @@ def test_rate_limit_retries_same_amount():
             (ResponseCode.RATE_LIMIT, 0),
             (ResponseCode.SUCCESS, 5),
             (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
         ]
     )
     rows, _ = fetch_category(client, "token-1", 9, set())
-    assert [call["amount"] for call in client.fetch_calls] == [50, 50, 50]
+    assert [call["amount"] for call in client.fetch_calls] == [50, 50, 50, 25, 10, 5, 1]
     assert len(rows) == 5
 
 
 def test_duplicates_are_skipped_via_seen_set():
     client = ScriptedClient(
-        script=[(ResponseCode.SUCCESS, 3), (ResponseCode.SUCCESS, 3), (ResponseCode.TOKEN_EMPTY, 0)],
+        script=[
+            (ResponseCode.SUCCESS, 3),
+            (ResponseCode.SUCCESS, 3),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+        ],
         duplicate_batches=True,
     )
     seen = set()
@@ -146,7 +178,16 @@ def test_duplicates_are_skipped_via_seen_set():
 
 
 def test_bronze_rows_carry_the_expected_columns():
-    client = ScriptedClient(script=[(ResponseCode.SUCCESS, 1), (ResponseCode.TOKEN_EMPTY, 0)])
+    client = ScriptedClient(
+        script=[
+            (ResponseCode.SUCCESS, 1),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+        ]
+    )
     rows, _ = fetch_category(client, "token-1", 9, set())
     expected = {
         "question_id",
@@ -168,7 +209,16 @@ def test_run_ingest_writes_csv_and_checkpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "BRONZE_CSV", tmp_path / "questions_raw.csv")
     monkeypatch.setattr(config, "BRONZE_RESPONSES_DIR", tmp_path / "_responses")
     monkeypatch.setattr(config, "INGEST_CHECKPOINT", tmp_path / "checkpoint.json")
-    client = ScriptedClient(script=[(ResponseCode.SUCCESS, 4), (ResponseCode.TOKEN_EMPTY, 0)])
+    client = ScriptedClient(
+        script=[
+            (ResponseCode.SUCCESS, 4),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+        ]
+    )
     run_ingest(client=client)
     frame = pd.read_csv(tmp_path / "questions_raw.csv")
     assert len(frame) == 4
