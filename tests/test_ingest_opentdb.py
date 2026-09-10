@@ -139,7 +139,8 @@ def test_token_not_found_requests_a_new_token_and_continues():
     assert len(rows) == 10
 
 
-def test_rate_limit_retries_same_amount():
+def test_rate_limit_retries_same_amount(monkeypatch):
+    monkeypatch.setattr("src.ingest_opentdb.time.sleep", lambda _: None)
     client = ScriptedClient(
         script=[
             (ResponseCode.RATE_LIMIT, 0),
@@ -153,6 +154,41 @@ def test_rate_limit_retries_same_amount():
     )
     rows, _ = fetch_category(client, "token-1", 9, set())
     assert [call["amount"] for call in client.fetch_calls] == [50, 50, 50, 25, 10, 5, 1]
+    assert len(rows) == 5
+
+
+def test_persistent_rate_limit_raises_instead_of_looping(monkeypatch):
+    monkeypatch.setattr("src.ingest_opentdb.time.sleep", lambda _: None)
+    client = ScriptedClient(script=[(ResponseCode.RATE_LIMIT, 0)] * 6)
+    with pytest.raises(RuntimeError):
+        fetch_category(client, "token-1", 9, set())
+
+
+def test_persistent_token_not_found_raises_instead_of_looping():
+    client = ScriptedClient(script=[(ResponseCode.TOKEN_NOT_FOUND, 0)] * 6)
+    with pytest.raises(RuntimeError):
+        fetch_category(client, "token-1", 9, set())
+
+
+def test_stall_counter_resets_after_a_success(monkeypatch):
+    monkeypatch.setattr("src.ingest_opentdb.time.sleep", lambda _: None)
+    client = ScriptedClient(
+        script=[
+            (ResponseCode.RATE_LIMIT, 0),
+            (ResponseCode.RATE_LIMIT, 0),
+            (ResponseCode.RATE_LIMIT, 0),
+            (ResponseCode.RATE_LIMIT, 0),
+            (ResponseCode.SUCCESS, 5),
+            (ResponseCode.RATE_LIMIT, 0),
+            (ResponseCode.RATE_LIMIT, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+            (ResponseCode.TOKEN_EMPTY, 0),
+        ]
+    )
+    rows, _ = fetch_category(client, "token-1", 9, set())
     assert len(rows) == 5
 
 

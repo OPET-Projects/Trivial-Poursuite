@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,10 @@ BRONZE_COLUMNS = [
     "fetched_at",
     "batch_id",
 ]
+
+# Nombre d'appels consécutifs sans progression (token invalide, rate limit)
+# toléré avant d'abandonner la catégorie. Borne la boucle de collecte.
+MAX_STALLED_ATTEMPTS = 5
 
 
 def make_question_id(question: str, correct_answer: str) -> str:
@@ -84,6 +89,7 @@ def fetch_category(
     rows: list[dict[str, Any]] = []
     ladder_index = 0
     call_index = 0
+    stalled = 0
 
     while ladder_index < len(config.AMOUNT_LADDER):
         amount = config.AMOUNT_LADDER[ladder_index]
@@ -95,20 +101,36 @@ def fetch_category(
             on_payload({"batch_id": batch_id, "category_id": category_id, "payload": payload})
 
         if code == ResponseCode.TOKEN_NOT_FOUND:
+            stalled += 1
+            if stalled >= MAX_STALLED_ATTEMPTS:
+                raise RuntimeError(
+                    f"Catégorie {category_id}: {stalled} appels sans progression, "
+                    f"dernier code de réponse {code}."
+                )
             token = client.request_token()
             continue
 
         if code == ResponseCode.RATE_LIMIT:
+            stalled += 1
+            if stalled >= MAX_STALLED_ATTEMPTS:
+                raise RuntimeError(
+                    f"Catégorie {category_id}: {stalled} appels sans progression, "
+                    f"dernier code de réponse {code}."
+                )
+            time.sleep(config.RATE_LIMIT_SECONDS * stalled)
             continue
 
         if code in (ResponseCode.NO_RESULTS, ResponseCode.TOKEN_EMPTY):
+            stalled = 0
             ladder_index += 1
             continue
 
         if code != ResponseCode.SUCCESS:
+            stalled = 0
             ladder_index += 1
             continue
 
+        stalled = 0
         for item in questions:
             row = _to_row(item, batch_id)
             if row["question_id"] in seen:
