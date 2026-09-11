@@ -41,7 +41,10 @@ sans refaire un seul appel au modèle.
 - Python 3.10 ou plus
 - [LM Studio](https://lmstudio.ai), serveur local démarré (onglet *Developer*),
   modèle chargé en mémoire
-- Environ 16 Go de RAM libre pour un modèle 27B quantisé en 4 bits
+- Environ 14 Go de RAM libre — le plus lourd des deux modèles,
+  `liquid/lfm2-24b-a2b`, pèse 13,4 Go quantisé en 4 bits. Les deux ne
+  tiennent pas ensemble en mémoire sur 24 Go, et n'ont pas à y tenir :
+  le pipeline les interroge l'un après l'autre
 
 ## Installation
 
@@ -73,6 +76,7 @@ python run_pipeline.py
 # Étages séparés
 python run_pipeline.py --stages ingest transform
 python run_pipeline.py --stages enrich --model "google/gemma-3-12b"
+python run_pipeline.py --stages enrich --model "liquid/lfm2-24b-a2b"
 python run_pipeline.py --stages judge
 
 # Smoke test rapide, une seule variante
@@ -358,22 +362,49 @@ Mesures sur les trois variantes, 24 appels, chauffe exclue :
 Un facteur **19** sur le budget, et les trois défauts disparaissent ensemble.
 L'estimation de 8 à 12 h de la conception redevient tenable.
 
+### Le second modèle
+
+`prism-ml/bonsai-27b`, retenu à la conception, **n'a jamais été téléchargé**.
+Il est remplacé par **`liquid/lfm2-24b-a2b`**, un mélange d'experts 24B à
+environ 2 milliards de paramètres actifs.
+
+Sondé selon le même protocole, 24 appels sur les trois variantes, chauffe
+exclue :
+
+| | `gemma-3-12b` | `lfm2-24b-a2b` |
+| --- | --- | --- |
+| Temps médian par appel | 0,77 s | **0,43 s** |
+| Jetons de complétion médians | 2 | **2** |
+| Réponses vides | 0 sur 24 | **0 sur 23** |
+| Appels avec raisonnement | 0 sur 24 | **0 sur 23** |
+| Appels tronqués | 0 sur 24 | **0 sur 23** |
+| Arbitre : verdicts conformes | 4 sur 4, en 0,84 s | **4 sur 4, en 0,38–0,41 s** |
+
+Les trois défauts qui ont fait écarter `gemma-4-12b-qat` sont absents. Le
+modèle entre dans la matrice sans réserve.
+
+Le contraste entre les deux est volontairement architectural — dense 12B contre
+mélange d'experts 24B-A2B — et non une variation de taille dans une même
+famille. Les deux modèles ne tiennent pas ensemble en mémoire sur 24 Go : le
+pipeline les interroge l'un après l'autre, ce que l'exécution séquentielle
+impose de toute façon.
+
 ### Ce qui reste dans le code
 
 `strip_reasoning` et le plafond `LLM_MAX_TOKENS = 256` sont **conservés**. Ils
-ne coûtent rien sur un modèle qui ne raisonne pas, et le second modèle prévu,
-`Bonsai-27B`, **n'a pas encore été sondé**. S'il raisonne, le même problème
-revient sur la moitié de la matrice — et il faudra reprendre cette décision
-pour lui. C'est la vérification à faire avant tout run de production.
+ne coûtent rien sur un modèle qui ne raisonne pas, et ils restent la seule
+protection le jour où un modèle à raisonnement entre dans la matrice. Tout
+modèle ajouté doit être sondé avant son run de production, comme les deux
+modèles retenus l'ont été.
 
 ---
 
 ## Limites et mesures
 
 > Les chiffres de cette section proviennent de **sondes réelles de quelques
-> dizaines d'appels** réalisées pendant le développement, sur un M1 Pro. Ce ne
-> sont **pas** des résultats de benchmark et ils ne doivent pas être extrapolés
-> comme tels.
+> dizaines d'appels** réalisées pendant le développement — `gemma-4-12b-qat` et
+> `gemma-3-12b` sur un M1 Pro, `lfm2-24b-a2b` sur un M5. Ce ne sont **pas** des
+> résultats de benchmark et ils ne doivent pas être extrapolés comme tels.
 
 **1. Les verdicts négatifs de l'arbitre LLM ne sont pas observables.**
 
@@ -391,9 +422,9 @@ de l'étage `llm_judge`.
 
 **2. Les réponses vides restent comptées comme fausses.**
 
-Avec `gemma-3-12b` le cas ne se produit plus, mais la mécanique est intacte et
-resservira si un modèle tronqué revient dans la matrice — `Bonsai-27B` n'étant
-pas sondé. Une réponse vide en `status = ok` entre au dénominateur comme une
+Aucun des deux modèles retenus ne produit le cas — 0 réponse vide sur les deux
+sondes — mais la mécanique est intacte et resservira si un modèle tronqué entre
+un jour dans la matrice. Une réponse vide en `status = ok` entre au dénominateur comme une
 réponse fausse. C'est la raison d'être des colonnes `n_empty` et `n_truncated`,
 et du dénominateur alternatif `n_scorable - n_empty` : le dashboard affiche les
 trois, et une accuracy qui confond « le modèle s'est trompé » et « le modèle a

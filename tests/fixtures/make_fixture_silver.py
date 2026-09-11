@@ -114,7 +114,7 @@ BASE_ANSWERS = {
 # Écarts par modèle, pour que les deux ne rendent pas des marts identiques.
 # (variante, question_id) -> (ai_answer, status, finish_reason)
 OVERRIDES = {
-    "prism-ml_bonsai-27b": {
+    "liquid_lfm2-24b-a2b": {
         ("p1_constrained_mcq", "q5"): ("A", "ok", "eosFound"),
         ("p1_constrained_mcq", "q1"): ("C", "ok", "eosFound"),
         ("p2_open_minimal", "q1"): ("Leonardo", "ok", "eosFound"),
@@ -124,7 +124,7 @@ OVERRIDES = {
 
 MODELS = [
     ("google/gemma-3-12b", "google_gemma-3-12b", "poste-1", "Apple M1 Pro"),
-    ("prism-ml/bonsai-27b", "prism-ml_bonsai-27b", "poste-2", "Apple M3 Max"),
+    ("liquid/lfm2-24b-a2b", "liquid_lfm2-24b-a2b", "poste-2", "Apple M3 Max"),
 ]
 
 # Un seul appel de chauffe par partition, pour exercer les clauses is_warmup
