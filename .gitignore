@@ -15,3 +15,11 @@ data/bronze/*
 data/silver/*
 !data/bronze/.gitkeep
 !data/silver/.gitkeep
+
+# Couche gold et artefacts dbt
+data/gold/*
+!data/gold/.gitkeep
+dbt_project/target/
+dbt_project/dbt_packages/
+dbt_project/logs/
+dbt_project/.user.yml

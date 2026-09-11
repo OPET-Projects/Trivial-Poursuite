@@ -1,0 +1,17 @@
+name: trivia_benchmark
+version: "1.0.0"
+config-version: 2
+profile: trivia_benchmark
+
+model-paths: ["models"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  trivia_benchmark:
+    staging:
+      +materialized: view
+    intermediate:
+      +materialized: table
+    marts:
+      +materialized: table

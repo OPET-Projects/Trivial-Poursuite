@@ -1,0 +1,49 @@
+version: 2
+
+models:
+  - name: stg_questions
+    description: Questions OpenTDB nettoyées, une ligne par question_id.
+    columns:
+      - name: question_id
+        tests: [unique, not_null]
+      - name: difficulty
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["easy", "medium", "hard"]
+      - name: question_type
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["multiple", "boolean"]
+
+  - name: stg_answers
+    description: Réponses brutes du runtime local, une ligne par triplet.
+    columns:
+      - name: question_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_questions')
+                field: question_id
+      - name: status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["ok", "error"]
+
+  - name: stg_judgments
+    description: Verdicts de la cascade, rejouables sans réinférence.
+    columns:
+      # Énumération alignée sur les valeurs réellement émises par judge_one
+      # (src/judge.py). Toute nouvelle valeur de match_method doit être
+      # ajoutée ici, sans quoi dbt build échoue — c'est voulu.
+      - name: match_method
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  ["boolean", "exact", "choice_letter", "choice_match", "fuzzy",
+                   "llm_judge", "no_match", "error"]
