@@ -39,7 +39,7 @@ SAMPLE_SIZE = 0
 SAMPLE_SEED = 42
 
 # LM Studio
-MODEL_NAME = os.environ.get("LLM_MODEL", "google/gemma-4-12b-qat")
+MODEL_NAME = os.environ.get("LLM_MODEL", "google/gemma-3-12b")
 JUDGE_MODEL_NAME = os.environ.get("JUDGE_MODEL", MODEL_NAME)
 LMSTUDIO_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "180"))
 LLM_TEMPERATURE = 0.0

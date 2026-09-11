@@ -6,9 +6,10 @@ trois variantes de prompt, une architecture médaillon et une restitution
 interactive.
 
 Matrice complète visée : environ 5 300 questions × 2 modèles × 3 variantes,
-soit à peu près 31 800 inférences. Voir [Limites et mesures](#limites-et-mesures)
-avant de lancer un run : le coût réel mesuré est nettement supérieur à celui
-prévu à la conception.
+soit à peu près 31 800 inférences, pour un coût mesuré d'environ **6,8 h
+cumulées**. Voir [Choix des modèles](#choix-des-modèles-et-exclusion-du-raisonnement) :
+ce budget tient à une décision précise, et le premier modèle retenu le faisait
+exploser d'un facteur 19.
 
 ---
 
@@ -55,7 +56,7 @@ Variables reconnues (`.env`) :
 
 | Variable | Défaut | Rôle |
 | --- | --- | --- |
-| `LLM_MODEL` | `google/gemma-4-12b-qat` | Modèle interrogé, identifiant tel qu'affiché par LM Studio |
+| `LLM_MODEL` | `google/gemma-3-12b` | Modèle interrogé, identifiant tel qu'affiché par LM Studio |
 | `JUDGE_MODEL` | valeur de `LLM_MODEL` | Modèle qui arbitre les réponses ambiguës |
 | `LLM_TIMEOUT_SECONDS` | `180` | Délai maximum d'un appel |
 
@@ -71,7 +72,7 @@ python run_pipeline.py
 
 # Étages séparés
 python run_pipeline.py --stages ingest transform
-python run_pipeline.py --stages enrich --model "google/gemma-4-12b-qat"
+python run_pipeline.py --stages enrich --model "google/gemma-3-12b"
 python run_pipeline.py --stages judge
 
 # Smoke test rapide, une seule variante
@@ -290,44 +291,95 @@ clair. Ce n'est pas de la coquetterie : voir ci-dessous.
 
 ---
 
+## Choix des modèles et exclusion du raisonnement
+
+Le modèle d'inférence par défaut est **`google/gemma-3-12b`**. Il a remplacé
+`google/gemma-4-12b-qat`, retenu à la conception, et cette substitution est la
+décision qui conditionne la faisabilité du benchmark. Elle mérite d'être
+justifiée.
+
+### Le problème
+
+`gemma-4-12b-qat` est un **modèle à raisonnement** : il émet sa réflexion avant
+sa réponse, séparée par un marqueur interne au SDK LM Studio. Ce comportement
+n'était pas anticipé par la conception, et il a produit trois défauts distincts
+qui ont tous la même cause.
+
+1. **Le coût.** Environ **214 jetons de complétion médians pour une réponse
+   utile d'un seul caractère**. Le poste de dépense est la réflexion, pas le
+   prompt.
+2. **La perte de données.** **Quatre réponses sur dix en `p1`** sortaient vides,
+   avec `status = ok` et `finish_reason = maxPredictedTokensReached` : le modèle
+   épuisait son plafond de jetons en réflexion et était tronqué avant d'émettre
+   sa réponse. Une telle ligne n'est pas une erreur du modèle sur le fond, mais
+   elle entre au dénominateur comme une réponse fausse.
+3. **L'arbitre.** Le juge LLM subissait la même troncature. Tronqué, il ne rend
+   rien, et son verdict tombe à `False` — indistinguable d'un vrai NON.
+
+### Pourquoi ne pas simplement désactiver le raisonnement
+
+Parce que ce n'est pas possible pour ce modèle. Cinq leviers ont été testés sur
+l'instance LM Studio du projet, aucun ne supprime la génération :
+
+| Levier | Résultat |
+| --- | --- |
+| Baseline | 84 jetons, raisonne |
+| Suffixe `/no_think` | 84 jetons, raisonne |
+| Consigne système « do not reason » | **131 jetons**, raisonne |
+| Sortie structurée (schéma JSON) | 94 jetons, raisonne |
+| SDK `reasoning_parsing: enabled=false` | 84 jetons, raisonne |
+
+Le détail contre-intuitif mérite d'être noté : **demander explicitement au
+modèle de ne pas raisonner lui fait consommer 56 % de jetons en plus**. Il
+raisonne sur la consigne.
+
+Les réglages de raisonnement de LM Studio (`autoExpandReasoningBlocks`,
+`reasoningBlocksVignette`, `separateReasoningContentInAPI`) ne contrôlent que
+l'**affichage** et la **délimitation**, jamais l'émission. Le raisonnement est
+une propriété du modèle, pas du runtime : `gemma-4-12b-qat` n'a pas de mode
+hybride commutable.
+
+### La décision
+
+Basculer sur `gemma-3-12b` : **même famille, même taille (12B)**, donc la
+comparaison avec le second modèle reste interprétable, mais sans raisonnement.
+
+Mesures sur les trois variantes, 24 appels, chauffe exclue :
+
+| | `gemma-4-12b-qat` | `gemma-3-12b` |
+| --- | --- | --- |
+| Temps médian par appel | 14,5 s | **0,77 s** |
+| Jetons de complétion médians | 214 | **2** |
+| Réponses vides en `p1` | 4 sur 10 | **0 sur 24** |
+| Appels avec raisonnement | tous | **0 sur 24** |
+| Arbitre : verdicts conformes | 3 sur 4, en 7,4–23,5 s | **4 sur 4, en 0,84 s** |
+| **Matrice complète, cumulée** | **~128 h** (~43 h/poste) | **~6,8 h** (~2,3 h/poste) |
+
+Un facteur **19** sur le budget, et les trois défauts disparaissent ensemble.
+L'estimation de 8 à 12 h de la conception redevient tenable.
+
+### Ce qui reste dans le code
+
+`strip_reasoning` et le plafond `LLM_MAX_TOKENS = 256` sont **conservés**. Ils
+ne coûtent rien sur un modèle qui ne raisonne pas, et le second modèle prévu,
+`Bonsai-27B`, **n'a pas encore été sondé**. S'il raisonne, le même problème
+revient sur la moitié de la matrice — et il faudra reprendre cette décision
+pour lui. C'est la vérification à faire avant tout run de production.
+
+---
+
 ## Limites et mesures
 
-> Les chiffres de cette section proviennent d'un **smoke test de 10 inférences
-> réelles** réalisé pendant le développement, sur un M1 Pro. Ce ne sont **pas**
-> des résultats de benchmark, et ils ne doivent pas être extrapolés comme tels.
+> Les chiffres de cette section proviennent de **sondes réelles de quelques
+> dizaines d'appels** réalisées pendant le développement, sur un M1 Pro. Ce ne
+> sont **pas** des résultats de benchmark et ils ne doivent pas être extrapolés
+> comme tels.
 
-**1. Le coût réel dépasse largement l'estimation de conception.**
+**1. Les verdicts négatifs de l'arbitre LLM ne sont pas observables.**
 
-| | Mesuré | Prévu à la conception |
-| --- | --- | --- |
-| `response_time` min / médian / max | 7,9 / 14,5 / 19,6 s | — |
-| Matrice complète, cumulée | **~128 h** (~43 h par poste sur trois) | 8 à 12 h |
-
-Le coût dominant est le raisonnement du modèle, pas la longueur du prompt :
-environ 214 jetons de complétion médians pour une réponse utile d'un seul
-caractère.
-
-**2. Quatre réponses sur dix en `p1` sont vides.**
-
-Elles sortent avec `status = ok` et `finish_reason = maxPredictedTokensReached` :
-le modèle épuise son plafond de 256 jetons en raisonnement, et la réponse finale
-est tronquée avant d'être émise. Une telle ligne n'est **pas** une erreur du
-modèle sur le fond, mais elle entre au dénominateur comme une réponse fausse si
-l'on n'y prend pas garde. C'est la raison d'être des colonnes `n_empty` et
-`n_truncated`, et du dénominateur alternatif `n_scorable - n_empty`.
-
-Relever le plafond récupère une partie de ces réponses mais aggrave le temps de
-run, et laisse subsister une classe pathologique où le modèle boucle sans jamais
-conclure.
-
-**3. L'arbitre LLM est tronqué de la même façon.**
-
-Quand `llm_judge` est tronqué, il ne rend rien, et le verdict est alors `False` —
-**indistinguable d'un vrai NON**.
-
-Et ce cas n'est pas observable depuis le gold. La cascade n'écrit
-`match_method = llm_judge` que sur un verdict **positif** ; un non, sincère ou
-dû à la troncature, retombe en `no_match` avec tous les résidus. Les lignes que
+La cascade n'écrit `match_method = llm_judge` que sur un verdict **positif** ;
+un non, sincère ou dû à une troncature, retombe en `no_match` avec tous les
+résidus. Les lignes que
 `mart_matching_impact` montre sous `llm_judge` sont donc celles que le juge a
 acceptées, pas celles où il a pu se tromper. L'effet net est une
 **sous-estimation de l'accuracy permissive, sans trace**.
@@ -337,7 +389,17 @@ négatif, ce qui élargirait l'énumération de `match_method` contrôlée par
 `stg_judgments`. Ce n'est pas fait : à corriger avant d'exploiter les chiffres
 de l'étage `llm_judge`.
 
-**4. Aucun chiffre du dashboard ne provient d'un benchmark réel à ce jour.**
+**2. Les réponses vides restent comptées comme fausses.**
+
+Avec `gemma-3-12b` le cas ne se produit plus, mais la mécanique est intacte et
+resservira si un modèle tronqué revient dans la matrice — `Bonsai-27B` n'étant
+pas sondé. Une réponse vide en `status = ok` entre au dénominateur comme une
+réponse fausse. C'est la raison d'être des colonnes `n_empty` et `n_truncated`,
+et du dénominateur alternatif `n_scorable - n_empty` : le dashboard affiche les
+trois, et une accuracy qui confond « le modèle s'est trompé » et « le modèle a
+été tronqué » ne mesure rien.
+
+**3. Aucun chiffre du dashboard ne provient d'un benchmark réel à ce jour.**
 
 Le silver est vide dans ce dépôt : aucun run de production n'a été mené. Tout ce
 qui a été vérifié — compilation des modèles dbt, typage, contrats, forme des

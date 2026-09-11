@@ -123,7 +123,7 @@ OVERRIDES = {
 }
 
 MODELS = [
-    ("google/gemma-4-12b-qat", "google_gemma-4-12b-qat", "poste-1", "Apple M1 Pro"),
+    ("google/gemma-3-12b", "google_gemma-3-12b", "poste-1", "Apple M1 Pro"),
     ("prism-ml/bonsai-27b", "prism-ml_bonsai-27b", "poste-2", "Apple M3 Max"),
 ]
 

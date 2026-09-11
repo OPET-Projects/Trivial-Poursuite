@@ -26,7 +26,7 @@ Contraintes imposées par le sujet :
 | Sujet | Décision |
 | --- | --- |
 | Périmètre d'inférence | Dataset complet, 2 modèles minimum, 3 variantes de prompt |
-| Modèles | `gemma-4-12b-qat` (existant) + `Bonsai-27B` (à télécharger) |
+| Modèles | `gemma-3-12b` (sans raisonnement, substitué à `gemma-4-12b-qat`) + `Bonsai-27B` (à télécharger, non sondé) |
 | Mode d'interrogation | Hybride : QCM contraint et question ouverte, portés par les variantes de prompt |
 | Décision `ai_correct` | Cascade exact → fuzzy → LLM-judge, avec `match_method` tracé |
 | Stockage des réponses | Parquet partitionné par `model` et `prompt_variant`, flush par lots de 150 |
