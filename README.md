@@ -1,22 +1,46 @@
-# Trivial Poursuite — Benchmark LLM (OpenTDB)
+# Trivial Poursuite — Benchmark LLM sur OpenTDB
 
-Pipeline Python de data engineering pour évaluer un modèle local (LM Studio) sur des questions de culture générale.
+Pipeline de data engineering qui évalue plusieurs modèles de langage **locaux**
+sur l'intégralité du corpus [Open Trivia Database](https://opentdb.com), avec
+trois variantes de prompt, une architecture médaillon et une restitution
+interactive.
 
-Couches livrées pour l’instant :
+Matrice complète visée : environ 5 300 questions × 2 modèles × 3 variantes,
+soit à peu près 31 800 inférences. Voir [Limites et mesures](#limites-et-mesures)
+avant de lancer un run : le coût réel mesuré est nettement supérieur à celui
+prévu à la conception.
 
-| Couche | Fichier | Contenu |
+---
+
+## Architecture médaillon
+
+| Couche | Emplacement | Contenu |
 | --- | --- | --- |
-| Bronze | `data/bronze/questions_raw.csv` | Données brutes OpenTDB (dataset intégral) |
-| Silver | `data/silver/questions_clean.parquet` | Questions nettoyées, dédoublonnées |
-| Silver | `data/silver/questions_enriched.parquet` | Échantillon + réponses du modèle |
+| Bronze | `data/bronze/questions_raw.csv` | Questions brutes, identifiant stable, payloads d'API archivés |
+| Bronze | `data/bronze/_responses/*.jsonl` | Journal des réponses d'API, en ajout |
+| Silver | `data/silver/questions.parquet` | Questions nettoyées, options mélangées par un ordre seedé |
+| Silver | `data/silver/answers/model=…/prompt_variant=…/` | Réponses des modèles, temps de réponse, provenance |
+| Silver | `data/silver/judgments/model=…/prompt_variant=…/` | Verdicts et méthode de décision |
+| Silver | `data/silver/runs/` | Métadonnées de run : poste, matériel, paramètres |
+| Gold | `data/gold/benchmark.duckdb` | Neuf marts métier construits par dbt |
+| Restitution | `app/streamlit_app.py` | Rapport interactif, sept pages |
 
-**Hors scope actuel :** couche gold (dbt / DuckDB) et dashboard Streamlit.
+Chaque étage écrit un artefact immuable et ne relit que l'étage précédent.
+Aucun étage ne modifie ce qu'un autre a produit.
+
+**Le jugement est séparé de l'inférence.** L'inférence coûte des heures et ne
+change jamais ; le jugement coûte des minutes et sera ajusté plusieurs fois
+(seuil de comparaison, prompt de l'arbitre). Ajuster un critère se rejoue donc
+sans refaire un seul appel au modèle.
+
+---
 
 ## Prérequis
 
-- Python 3.10+
-- [LM Studio](https://lmstudio.ai/) installé, avec le modèle `google/gemma-4-12b-qat` téléchargé
-- Serveur LM Studio démarré (onglet **Developer** → *Start server*) et le modèle **chargé en mémoire**
+- Python 3.10 ou plus
+- [LM Studio](https://lmstudio.ai), serveur local démarré (onglet *Developer*),
+  modèle chargé en mémoire
+- Environ 16 Go de RAM libre pour un modèle 27B quantisé en 4 bits
 
 ## Installation
 
@@ -24,55 +48,325 @@ Couches livrées pour l’instant :
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env      # puis renseigner LLM_MODEL
 ```
 
-## Lancer le pipeline
+Variables reconnues (`.env`) :
+
+| Variable | Défaut | Rôle |
+| --- | --- | --- |
+| `LLM_MODEL` | `google/gemma-4-12b-qat` | Modèle interrogé, identifiant tel qu'affiché par LM Studio |
+| `JUDGE_MODEL` | valeur de `LLM_MODEL` | Modèle qui arbitre les réponses ambiguës |
+| `LLM_TIMEOUT_SECONDS` | `180` | Délai maximum d'un appel |
+
+---
+
+## Exécution
+
+### 1. Pipeline
 
 ```bash
-# 1. Scrape OpenTDB (~8–10 min, rate limit 5 s) + nettoyage + 400 questions via Gemma
+# Tout le pipeline : ingest → transform → enrich → judge
 python run_pipeline.py
 
-# 2. Reprendre l’enrichissement LLM sans re-scraper
-python run_pipeline.py --skip-ingest
+# Étages séparés
+python run_pipeline.py --stages ingest transform
+python run_pipeline.py --stages enrich --model "google/gemma-4-12b-qat"
+python run_pipeline.py --stages judge
 
-# 3. Enrichir tout le dataset (plus tard)
-python run_pipeline.py --sample-size 0
+# Smoke test rapide, une seule variante
+python run_pipeline.py --stages enrich --sample-size 20 --variants p1_constrained_mcq
 ```
 
-Autres options :
+**Répartition sur plusieurs postes.** `--shard i/n` découpe le travail de façon
+déterministe : chaque poste traite la tranche `i` sur `n`, sans recouvrement et
+sans coordination. Les parquets produits sont ensuite mutualisés à la main.
 
 ```bash
-python run_pipeline.py --force-ingest     # re-télécharge OpenTDB
-python run_pipeline.py --skip-transform   # bronze déjà propre
-python run_pipeline.py --skip-enrich      # scrape + silver seulement
-python run_pipeline.py --sample-size 50   # smoke test rapide
+python run_pipeline.py --stages enrich --shard 0/3    # poste 1
+python run_pipeline.py --stages enrich --shard 1/3    # poste 2
+python run_pipeline.py --stages enrich --shard 2/3    # poste 3
 ```
 
-Chaque script est aussi exécutable seul :
+**Rejouer le jugement sans réinférence.** C'est la propriété qui rend le projet
+tenable : l'étage `judge` relit les réponses déjà écrites et n'appelle jamais le
+modèle d'inférence.
 
 ```bash
-python -m src.ingest_opentdb
-python -m src.transform_silver
-python -m src.enrich_llm --sample-size 400
+python run_pipeline.py --stages judge                 # rejoue tous les modèles
+python run_pipeline.py --stages judge --no-llm-judge  # sans l'arbitre LLM
 ```
+
+**Reprise.** L'inférence est reprenable. Relancer la même commande après une
+interruption repart où le run s'est arrêté : la clé `(question_id, model_slug,
+prompt_variant)` identifie ce qui est déjà fait, et seules les lignes en
+`status = ok` comptent comme acquises.
+
+Options complètes : `python run_pipeline.py --help`.
+
+### 2. Couche gold
+
+```bash
+cd dbt_project
+dbt deps
+dbt build --profiles-dir .
+cd ..
+```
+
+### 3. Dashboard
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+> **Sans couche gold, le dashboard s'ouvre sur un message d'erreur** nommant la
+> commande dbt à lancer — c'est l'état d'un dépôt fraîchement cloné, et c'est
+> normal. Les étapes 1 et 2 doivent avoir été exécutées avant.
+
+### Voir le dashboard sans lancer d'inférence
+
+Un générateur de silver synthétique permet d'exercer dbt et l'interface sans les
+dizaines d'heures d'appels au modèle :
+
+```bash
+python tests/fixtures/make_fixture_silver.py
+cd dbt_project && dbt build --profiles-dir . && cd ..
+streamlit run app/streamlit_app.py
+```
+
+Le jeu couvre délibérément les cas qui rendent les marts interprétables :
+quatre catégories, trois difficultés, les quatre positions de bonne réponse,
+deux modèles, trois variantes, un appel de chauffe, une réponse tronquée, une
+panne de transport, le piège du rang numérique et une réponse lettrée en mode
+ouvert. Les jugements sont produits par le **vrai** `run_judge`, pas imités.
+
+Le script refuse d'écraser un silver existant sans `--force` : il ne peut pas
+détruire un run de production par accident.
+
+> Les chiffres affichés sont alors **synthétiques**. Ils valident la chaîne
+> technique, pas les performances des modèles.
+
+---
 
 ## Méthodologie
 
-1. **Collecte** — OpenTDB ne sert que 50 questions par appel, **tirées au hasard**. Sans mécanisme anti-doublons, les lots se recoupent. L’API publique **n’a pas de pagination `offset` ni de clé API** ; le *session token* (`/api_token.php`) est le moyen officiel de ne jamais reresservir la même question. Le scrape :
-    - demande un session token,
-    - parcourt **chaque catégorie** jusqu’à épuisement (`response_code` 4 ou 1),
-    - écarte les doublons restants par empreinte `catégorie + question + réponse`,
-    - reprend via un checkpoint (`offset` local + index de catégorie).
-    Si une clé est fournie par le cours : copier `.env.example` vers `.env` et renseigner `OPENTDB_API_KEY` (le script ajoute alors `apiKey` + `offset` aux requêtes). Pause de 5,1 s entre les appels.
-2. **Nettoyage** — décodage HTML, identifiant stable `question_id` (SHA-1), dédoublonnage, options QCM dans un ordre déterministe.
-3. **Échantillon** — ~400 questions, stratifié par `category × difficulty × type`, seed `42`. `--sample-size 0` = tout le dataset.
-4. **Prompt** — variante unique `strict_verbatim_v1` : le modèle doit recopier une option (QCM) ou répondre `True`/`False`. Le texte du prompt est stocké (`prompt_id`, `prompt_text`).
-5. **Scoring** — normalisation (casse, accents, ponctuation) puis égalité ; filet RapidFuzz (≥ 90) pour les variantes de noms.
-6. **Ré-entrance** — l’enrichissement ignore les `question_id` déjà présents dans le parquet silver.
+### Collecte
 
-Colonnes d’enrichissement : `model_name`, `ai_answer`, `ai_correct`, `response_time`.
+L'API OpenTDB sert au maximum 50 questions par appel, pour une seule catégorie,
+sans pagination `offset` ni clé publique. Le *session token* est le seul
+mécanisme anti-doublons officiel. Rythme appliqué : une requête toutes les
+**5,1 s**.
 
-## Suite prévue
+**Piège central.** Quand une catégorie contient moins de questions non servies
+que le nombre demandé, l'API répond *sans aucune question* — code 1
+(`NO_RESULTS`), ou code 4 (`TOKEN_EMPTY`) selon l'état du token, observé en
+pratique alors même que des questions restent disponibles à un montant
+inférieur. Demander systématiquement 50 perd donc la queue de chaque catégorie.
+Le scraper dégrade le montant demandé selon l'échelle **50 → 25 → 10 → 5 → 1**
+sur ces deux codes avant de conclure à l'épuisement réel.
 
-- Couche **gold** (DuckDB) construite avec **dbt** : perf globale, par catégorie, par difficulté, par prompt
-- Dashboard **Streamlit**
+Les champs sont demandés en **base64** pour éviter les entités HTML doublement
+encodées.
+
+### Identifiant stable
+
+`question_id` est un **SHA-256 tronqué à 16 caractères** du couple question +
+réponse correcte, normalisé de façon minimale et calculé dès l'ingestion. Il ne
+dépend d'aucune décision de nettoyage ultérieure : faire évoluer le silver ne
+rend jamais orphelines les réponses déjà obtenues.
+
+### Ordre des options
+
+Les propositions sont mélangées par un générateur **seedé avec `question_id`**.
+Un tri alphabétique plaçait systématiquement `False` en première position sur
+les questions vrai/faux et ordonnait les réponses numériques par magnitude : le
+biais de position des modèles devenait alors corrélé au contenu, donc inégal
+selon la catégorie. Le mélange est reproductible à l'identique entre postes et
+entre exécutions. La position de la bonne réponse est stockée
+(`correct_answer_position`), ce qui permet de mesurer le biais de position.
+
+Les propositions strictement identiques sont dédoublonnées avant mélange :
+le corpus contient des lignes où une proposition incorrecte reprend la bonne
+réponse mot pour mot, ce qui rendrait la position ambiguë.
+
+### Variantes de prompt
+
+Trois variantes standardisées, tracées dans chaque ligne de résultat par leur
+identifiant et par une empreinte du gabarit (`prompt_hash`) — toute modification
+d'un prompt est ainsi détectable a posteriori.
+
+| Variante | Mode | Description |
+| --- | --- | --- |
+| `p1_constrained_mcq` | contraint | Options **lettrées A/B/C/D**, le modèle répond par la lettre seule |
+| `p2_open_minimal` | ouvert | Question nue, consigne minimale |
+| `p3_open_guided` | ouvert | Question nue, consigne de format renforcée |
+
+L'écart **p1 / p3** sépare ce qu'un modèle *reconnaît* de ce qu'il sait
+*restituer*. L'écart **p2 / p3** isole l'apport de l'ingénierie de prompt, à
+mode d'interrogation constant.
+
+Plancher de hasard en `p1` : 25 % sur les QCM, 50 % sur les vrai/faux.
+
+> Le format lettré remplace une recopie verbatim de l'option. Une lettre est un
+> jeton unique et non ambigu, là où la recopie échouait sur la moindre variation
+> de casse ou de ponctuation.
+
+### Décision de justesse
+
+Une cascade à huit niveaux rend chaque verdict auditable. Le premier niveau qui
+conclut l'emporte, et la méthode retenue est stockée dans `match_method` :
+
+| # | `match_method` | Règle |
+| --- | --- | --- |
+| 1 | `error` | Appel en échec. **Exclu du dénominateur** des taux de réussite |
+| 2 | `boolean` | Question vrai/faux, ramenée à un booléen par lexique |
+| 3 | `exact` | Égalité après normalisation |
+| 4 | `choice_letter` | La réponse désigne une option par sa lettre ou son rang |
+| 5 | `choice_match` | La réponse correspond à une **et une seule** option proposée |
+| 6 | `fuzzy` | `token_set_ratio` ≥ 90 |
+| 7 | `llm_judge` | Résidu seulement : équivalence sémantique arbitrée par le modèle local, réponse contrainte à `YES` / `NO` |
+| 8 | `no_match` | Aucun niveau n'a conclu |
+
+**Normalisation** : minuscules, dépliage des accents, suppression de la
+ponctuation, compression des espaces, retrait des articles initiaux anglais.
+
+**Deux gardes anti-faux-positifs** :
+
+- La comparaison approchée est **désactivée sur les réponses numériques**
+  (`answer_is_numeric`) : « 1789 » et « 1798 » obtiennent un score de similarité
+  élevé sans être équivalents.
+- La résolution **par rang** est désactivée sur ces mêmes réponses : sinon une
+  réponse « 3 » à une question numérique serait résolue en troisième option, et
+  tomberait juste par coïncidence de position. La résolution par lettre reste
+  active.
+
+**Deux taux sont publiés.** `ai_correct_strict` ne retient que les niveaux
+exacts (`boolean`, `exact`, `choice_letter`, `choice_match`) ; `ai_correct`
+inclut les niveaux approchés. L'écart entre les deux, ventilé par
+`match_method`, est un résultat en soi — il mesure ce que la tolérance de
+comparaison ajoute au score.
+
+### Mesure du temps
+
+Les appels sont **séquentiels** : paralléliser rendrait `response_time`
+ininterprétable, LM Studio mettant les requêtes en file. La construction du
+backend — qui charge le modèle en mémoire — est résolue **hors chronomètre**.
+La première inférence de chaque run reste marquée `is_warmup` et les marts de
+latence l'excluent.
+
+Chaque ligne enregistre le poste et le matériel (`host`, `hardware`,
+`os_version`, `python_version`). Les runs étant répartis entre les machines de
+l'équipe, **les temps ne sont comparables qu'à l'intérieur d'un même poste**, ce
+que le dashboard applique.
+
+### Erreurs
+
+Un échec d'appel n'est pas une mauvaise réponse. La ligne est conservée avec
+`status = error`, exclue du dénominateur des taux de réussite, et repasse dans
+la file au run suivant.
+
+---
+
+## Couche gold
+
+Neuf marts, construits par dbt sur `int_results` (une ligne par
+`question_id` × `model_slug` × `prompt_variant`) :
+
+| Mart | Question à laquelle il répond |
+| --- | --- |
+| `mart_model_performance` | Quel modèle est le meilleur, globalement ? |
+| `mart_performance_by_category` | Sur quels domaines chaque modèle excelle ou décroche |
+| `mart_performance_by_difficulty` | La difficulté annoncée par OpenTDB prédit-elle l'échec ? |
+| `mart_prompt_performance` | Quelle variante de prompt tire le meilleur d'un modèle |
+| `mart_latency` | Temps de réponse, par poste |
+| `mart_question_hardness` | Quelles questions résistent à tous les modèles |
+| `mart_matching_impact` | Ce que chaque niveau de la cascade ajoute au score |
+| `mart_position_bias` | Le modèle privilégie-t-il une position de réponse ? |
+| `mart_errors` | Pannes de transport, volume et fenêtre temporelle |
+
+Les marts d'accuracy exposent **trois dénominateurs** (`n_scorable`,
+`n_judged`, `n_scorable - n_empty`) ainsi que `n_empty` et `n_truncated` en
+clair. Ce n'est pas de la coquetterie : voir ci-dessous.
+
+---
+
+## Limites et mesures
+
+> Les chiffres de cette section proviennent d'un **smoke test de 10 inférences
+> réelles** réalisé pendant le développement, sur un M1 Pro. Ce ne sont **pas**
+> des résultats de benchmark, et ils ne doivent pas être extrapolés comme tels.
+
+**1. Le coût réel dépasse largement l'estimation de conception.**
+
+| | Mesuré | Prévu à la conception |
+| --- | --- | --- |
+| `response_time` min / médian / max | 7,9 / 14,5 / 19,6 s | — |
+| Matrice complète, cumulée | **~128 h** (~43 h par poste sur trois) | 8 à 12 h |
+
+Le coût dominant est le raisonnement du modèle, pas la longueur du prompt :
+environ 214 jetons de complétion médians pour une réponse utile d'un seul
+caractère.
+
+**2. Quatre réponses sur dix en `p1` sont vides.**
+
+Elles sortent avec `status = ok` et `finish_reason = maxPredictedTokensReached` :
+le modèle épuise son plafond de 256 jetons en raisonnement, et la réponse finale
+est tronquée avant d'être émise. Une telle ligne n'est **pas** une erreur du
+modèle sur le fond, mais elle entre au dénominateur comme une réponse fausse si
+l'on n'y prend pas garde. C'est la raison d'être des colonnes `n_empty` et
+`n_truncated`, et du dénominateur alternatif `n_scorable - n_empty`.
+
+Relever le plafond récupère une partie de ces réponses mais aggrave le temps de
+run, et laisse subsister une classe pathologique où le modèle boucle sans jamais
+conclure.
+
+**3. L'arbitre LLM est tronqué de la même façon.**
+
+Quand `llm_judge` est tronqué, il ne rend rien, et le verdict est alors `False` —
+**indistinguable d'un vrai NON**. Les lignes en `match_method = llm_judge` sont
+donc moins fiables que les autres ; `mart_matching_impact` permet de les isoler.
+
+**4. Aucun chiffre du dashboard ne provient d'un benchmark réel à ce jour.**
+
+Le silver est vide dans ce dépôt : aucun run de production n'a été mené. Tout ce
+qui a été vérifié — compilation des modèles dbt, typage, contrats, forme des
+agrégats, rendu des sept pages — l'a été sur des **fixtures synthétiques**. La
+chaîne technique est validée ; les résultats du benchmark restent à produire.
+
+---
+
+## Organisation du projet
+
+| Chemin | Rôle |
+| --- | --- |
+| `config.py` | Chemins et paramètres, modèle lu depuis l'environnement |
+| `run_pipeline.py` | Orchestration par étages, sharding |
+| `src/opentdb_client.py` | Transport HTTP : rythme, retries, codes de réponse |
+| `src/ingest_opentdb.py` | Collecte par catégorie vers la couche bronze |
+| `src/transform_silver.py` | Nettoyage, mélange seedé des options |
+| `src/prompts.py` | Registre versionné des trois variantes |
+| `src/llm_client.py` | Appel au runtime local, chronométrage, jetons |
+| `src/enrich_llm.py` | Inférence reprenable, écriture partitionnée |
+| `src/scoring.py` | Primitives de comparaison |
+| `src/judge.py` | Cascade de jugement |
+| `src/io_utils.py`, `src/runmeta.py` | Écritures atomiques, provenance |
+| `dbt_project/` | Staging, intermédiaire, neuf marts, tests |
+| `app/` | Dashboard Streamlit et couche d'accès au gold |
+| `tests/` | Suite pytest, sans accès réseau ni modèle |
+| `tests/fixtures/` | Générateur de silver synthétique |
+
+---
+
+## Tests
+
+```bash
+python -m pytest -q                                   # 198 tests
+cd dbt_project && dbt build --profiles-dir .          # 13 modèles, 43 tests
+```
+
+La suite pytest ne touche ni le réseau ni LM Studio : les étages sont doublés,
+et le module `lmstudio` n'est jamais importé. Elle est donc exécutable sur une
+machine sans modèle installé.
+
+Les tests dbt exigent une couche silver — utiliser le générateur de fixtures
+ci-dessus si aucun run n'a été mené.
