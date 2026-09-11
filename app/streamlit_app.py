@@ -340,9 +340,10 @@ elif page == "Qualité du matching":
             "Mart d'audit : il montre ce que l'accuracy doit à l'appariement plutôt "
             "qu'au modèle. Deux lectures à faire — la part de `choice_letter` en mode "
             "**ouvert**, où le modèle n'a jamais vu les options et peut tomber juste "
-            "par accident ; et la part de `llm_judge`, dont les verdicts sont moins "
-            "fiables, le juge subissant la même troncature de raisonnement que "
-            "l'inférence."
+            "par accident ; et la part de `llm_judge`, qui ne compte que les verdicts "
+            "**acceptés** par le juge. Un verdict négatif retombe en `no_match`, donc "
+            "les cas où le juge s'est trompé — il subit la même troncature de "
+            "raisonnement que l'inférence — ne sont pas isolables ici."
         )
         models = sorted(frame["model_slug"].dropna().unique())
         model = st.selectbox("Modèle", models) if models else None

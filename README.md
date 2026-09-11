@@ -323,8 +323,19 @@ conclure.
 **3. L'arbitre LLM est tronqué de la même façon.**
 
 Quand `llm_judge` est tronqué, il ne rend rien, et le verdict est alors `False` —
-**indistinguable d'un vrai NON**. Les lignes en `match_method = llm_judge` sont
-donc moins fiables que les autres ; `mart_matching_impact` permet de les isoler.
+**indistinguable d'un vrai NON**.
+
+Et ce cas n'est pas observable depuis le gold. La cascade n'écrit
+`match_method = llm_judge` que sur un verdict **positif** ; un non, sincère ou
+dû à la troncature, retombe en `no_match` avec tous les résidus. Les lignes que
+`mart_matching_impact` montre sous `llm_judge` sont donc celles que le juge a
+acceptées, pas celles où il a pu se tromper. L'effet net est une
+**sous-estimation de l'accuracy permissive, sans trace**.
+
+Rendre ces lignes visibles demanderait une valeur de cascade dédiée au verdict
+négatif, ce qui élargirait l'énumération de `match_method` contrôlée par
+`stg_judgments`. Ce n'est pas fait : à corriger avant d'exploiter les chiffres
+de l'étage `llm_judge`.
 
 **4. Aucun chiffre du dashboard ne provient d'un benchmark réel à ce jour.**
 
