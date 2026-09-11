@@ -6,8 +6,8 @@ trois variantes de prompt, une architecture médaillon et une restitution
 interactive.
 
 Matrice complète visée : environ 5 300 questions × 2 modèles × 3 variantes,
-soit à peu près 31 800 inférences, pour un coût mesuré d'environ **6,8 h
-cumulées**. Voir [Choix des modèles](#choix-des-modèles-et-exclusion-du-raisonnement) :
+soit à peu près 31 800 inférences, pour un coût **mesuré à 3 h 43** sur un seul
+poste. Voir [Choix des modèles](#choix-des-modèles-et-exclusion-du-raisonnement) :
 ce budget tient à une décision précise, et le premier modèle retenu le faisait
 exploser d'un facteur 19.
 
@@ -260,9 +260,14 @@ La première inférence de chaque run reste marquée `is_warmup` et les marts de
 latence l'excluent.
 
 Chaque ligne enregistre le poste et le matériel (`host`, `hardware`,
-`os_version`, `python_version`). Les runs étant répartis entre les machines de
-l'équipe, **les temps ne sont comparables qu'à l'intérieur d'un même poste**, ce
+`os_version`, `python_version`), et `mart_latency` groupe par `host` :
+**des temps produits par des matériels différents ne sont pas comparables**, ce
 que le dashboard applique.
+
+Le premier run complet a tourné **en entier sur une seule machine**, un Apple
+M5. Ses temps sont donc directement comparables entre modèles et entre
+variantes, et le cloisonnement par poste n'y sépare rien — il reste en place
+pour le jour où le travail sera réparti par `--shard`.
 
 ### Erreurs
 
@@ -381,7 +386,9 @@ exclue :
 | Arbitre : verdicts conformes | 4 sur 4, en 0,84 s | **4 sur 4, en 0,38–0,41 s** |
 
 Les trois défauts qui ont fait écarter `gemma-4-12b-qat` sont absents. Le
-modèle entre dans la matrice sans réserve.
+modèle entre dans la matrice sans réserve, et le budget complet — les deux
+modèles, les trois variantes — s'est établi à **3 h 43 sur un seul poste**,
+2 h 05 pour `gemma-3-12b` et 1 h 38 pour `lfm2-24b-a2b`.
 
 Le contraste entre les deux est volontairement architectural — dense 12B contre
 mélange d'experts 24B-A2B — et non une variation de taille dans une même
@@ -399,12 +406,96 @@ modèles retenus l'ont été.
 
 ---
 
+## Résultats du premier run complet
+
+Run du 11 septembre 2026, Apple M5, 24 Go. **31 770 inférences, aucune erreur
+de transport** — `mart_errors` est vide. Inférence 3 h 43, collecte 40 min,
+jugement environ 55 min, dont 8 329 appels à l'arbitre pour 1 187 verdicts
+positifs retenus.
+
+| Modèle | strict | permissif | vides | tronqués |
+| --- | --- | --- | --- | --- |
+| **`gemma-3-12b`** | **58,2 %** | **66,1 %** | 0 | 0 |
+| `lfm2-24b-a2b` | 44,9 % | 52,7 % | 1 | 4 |
+
+`gemma-3-12b` l'emporte de 13,3 points, et l'écart tient sur les deux
+dénominateurs. Il est aussi le seul des deux à ne produire ni réponse vide ni
+troncature sur ses 15 885 appels.
+
+| Modèle | Variante | strict | permissif | Longueur de réponse |
+| --- | --- | --- | --- | --- |
+| `gemma-3-12b` | `p1` | 70,7 % | 70,7 % | 1,0 car. |
+| `gemma-3-12b` | `p2` | 52,4 % | 64,1 % | 9,6 car. |
+| `gemma-3-12b` | `p3` | 51,5 % | 63,4 % | 9,1 car. |
+| `lfm2-24b-a2b` | `p1` | 61,0 % | 61,0 % | 1,0 car. |
+| `lfm2-24b-a2b` | `p2` | 36,0 % | 49,4 % | 25,5 car. |
+| `lfm2-24b-a2b` | `p3` | 37,8 % | 47,7 % | 9,9 car. |
+
+### L'ingénierie de prompt n'a rien apporté
+
+`p3` devait battre `p2` : c'était l'hypothèse qui justifiait la variante. En
+accuracy permissive elle est **plus mauvaise pour les deux modèles**, de 0,7
+point sur `gemma-3-12b` et de 1,7 point sur `lfm2-24b-a2b`. Le résultat est
+négatif et il porte sur 10 590 appels par modèle.
+
+La nuance est ailleurs. Sur `lfm2-24b-a2b`, la consigne renforcée fait tomber la
+longueur moyenne de réponse de 25,5 à 9,9 caractères et gagne 1,8 point en
+accuracy stricte. Elle corrige un problème de **format** — une verbosité qui
+faisait échouer la comparaison exacte — sans ajouter de connaissance. C'est
+précisément ce que l'écart strict/permissif est là pour distinguer.
+
+### Le biais de position est propre à un modèle
+
+Part des choix par position, sur les QCM à quatre options :
+
+| Position | `gemma-3-12b` | `lfm2-24b-a2b` |
+| --- | --- | --- |
+| A | 25,4 % | 23,7 % |
+| B | 27,7 % | 26,6 % |
+| C | 27,5 % | 25,5 % |
+| **D** | **19,4 %** | 24,0 % |
+
+`gemma-3-12b` sous-choisit la dernière option d'environ 5 points ;
+`lfm2-24b-a2b` est équilibré. Le mélange seedé répartissant les bonnes réponses
+entre 24 et 26 % par position, l'écart est une propriété du modèle et non des
+données. C'est la mesure que le mélange seedé rendait possible.
+
+### Le mode ouvert est dominé par `no_match`
+
+De 26,8 % à 40,6 % des lignes selon le modèle et la variante terminent la
+cascade sans conclusion, et sont comptées fausses. C'est le poste qui explique
+l'essentiel de l'écart entre `p1` et les variantes ouvertes.
+
+Deux niveaux de la cascade se lisent de travers si on ignore leur construction :
+
+- **`choice_match` affiche 0 % d'accuracy partout.** Ce n'est pas une anomalie :
+  une réponse qui désigne la *bonne* option est captée par `exact` au niveau 3.
+  Ce niveau ne peut donc, par construction, capter que des réponses désignant
+  une mauvaise option.
+- **`llm_judge` affiche 100 % en permissif et 0 % en strict.** C'est la limite
+  documentée ci-dessous, désormais vérifiée sur données réelles : seuls les
+  verdicts positifs s'y inscrivent.
+
+### Latence
+
+`lfm2-24b-a2b` est **plus rapide et moins bon** : médiane de 0,252 à 0,361 s
+contre 0,418 à 0,511 s, et 25,4 jetons par seconde en `p2` contre 8,2. Son
+architecture à mélange d'experts, environ 2 milliards de paramètres actifs sur
+24, se lit directement dans le débit.
+
+> Ces chiffres sont ceux d'**un** run, sur **un** corpus, avec **deux** modèles
+> locaux quantisés en 4 bits. Ils ne disent rien des mêmes modèles en pleine
+> précision, ni d'un autre corpus que les questions vérifiées d'OpenTDB.
+
+---
+
 ## Limites et mesures
 
-> Les chiffres de cette section proviennent de **sondes réelles de quelques
-> dizaines d'appels** réalisées pendant le développement — `gemma-4-12b-qat` et
-> `gemma-3-12b` sur un M1 Pro, `lfm2-24b-a2b` sur un M5. Ce ne sont **pas** des
-> résultats de benchmark et ils ne doivent pas être extrapolés comme tels.
+> Les chiffres de **sonde** cités plus haut — ceux qui ont motivé le choix des
+> modèles — proviennent de quelques dizaines d'appels réalisés pendant le
+> développement : `gemma-4-12b-qat` et `gemma-3-12b` sur un M1 Pro,
+> `lfm2-24b-a2b` sur un M5. Ils ne doivent pas être confondus avec les
+> résultats du run complet, rapportés à la section précédente.
 
 **1. Les verdicts négatifs de l'arbitre LLM ne sont pas observables.**
 
@@ -415,6 +506,12 @@ résidus. Les lignes que
 acceptées, pas celles où il a pu se tromper. L'effet net est une
 **sous-estimation de l'accuracy permissive, sans trace**.
 
+Le run complet le confirme : `mart_matching_impact` donne 100 % d'accuracy
+permissive et 0 % de stricte sur les 1 187 lignes `llm_judge`, alors que
+l'arbitre a été appelé 8 329 fois. Les 7 142 appels restants — verdicts
+négatifs, sincères ou tronqués — sont indiscernables des autres résidus dans
+`no_match`.
+
 Rendre ces lignes visibles demanderait une valeur de cascade dédiée au verdict
 négatif, ce qui élargirait l'énumération de `match_method` contrôlée par
 `stg_judgments`. Ce n'est pas fait : à corriger avant d'exploiter les chiffres
@@ -422,10 +519,11 @@ de l'étage `llm_judge`.
 
 **2. Les réponses vides restent comptées comme fausses.**
 
-Aucun des deux modèles retenus ne produit le cas — 0 réponse vide sur les deux
-sondes — mais la mécanique est intacte et resservira si un modèle tronqué entre
-un jour dans la matrice. Une réponse vide en `status = ok` entre au dénominateur comme une
-réponse fausse. C'est la raison d'être des colonnes `n_empty` et `n_truncated`,
+Le run complet en produit **5 sur 31 770** — une réponse vide et quatre
+troncatures, toutes sur `lfm2-24b-a2b`. L'effet est négligeable ici, mais la
+mécanique est intacte et resservira si un modèle tronqué entre un jour dans la
+matrice. Une réponse vide en `status = ok` entre au
+dénominateur comme une réponse fausse. C'est la raison d'être des colonnes `n_empty` et `n_truncated`,
 et du dénominateur alternatif `n_scorable - n_empty` : le dashboard affiche les
 trois, et une accuracy qui confond « le modèle s'est trompé » et « le modèle a
 été tronqué » ne mesure rien.
