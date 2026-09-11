@@ -34,6 +34,7 @@ select
     a.max_tokens,
     a.status,
     a.is_warmup,
+    a.answered_at,
     a.host,
     a.hardware,
     a.run_id,
