@@ -1,4 +1,6 @@
-from src.llm_client import LLMClient, clean_answer
+import pytest
+
+from src.llm_client import LLMClient, clean_answer, parse_completion
 
 
 class FakeBackend:
@@ -117,3 +119,54 @@ def test_backend_construction_is_outside_the_timer():
     result = LazyClient("fake/model").complete("sys", "user")
     assert result.status == "ok"
     assert result.response_time < 0.15, "la construction du backend fuit dans le chronométrage"
+
+
+def _completion(content="Paris", finish_reason="stop", usage=None, reasoning=""):
+    return {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": content, "reasoning_content": reasoning},
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage if usage is not None else {"prompt_tokens": 44, "completion_tokens": 4},
+    }
+
+
+def test_parse_completion_reads_text_and_token_counts():
+    parsed = parse_completion(_completion())
+    assert parsed == {
+        "text": "Paris",
+        "prompt_tokens": 44,
+        "completion_tokens": 4,
+        "finish_reason": "eosFound",
+    }
+
+
+def test_parse_completion_maps_length_to_the_truncation_marker_dbt_reads():
+    """int_results détecte la troncature sur ce libellé, hérité du SDK."""
+    assert parse_completion(_completion(finish_reason="length"))["finish_reason"] == (
+        "maxPredictedTokensReached"
+    )
+
+
+def test_parse_completion_keeps_unknown_finish_reasons_verbatim():
+    assert parse_completion(_completion(finish_reason="tool_calls"))["finish_reason"] == "tool_calls"
+
+
+def test_parse_completion_never_scores_the_reasoning():
+    parsed = parse_completion(_completion(content="Tungsten", reasoning="W is Wolfram, so..."))
+    assert parsed["text"] == "Tungsten"
+
+
+def test_parse_completion_tolerates_missing_usage_and_content():
+    parsed = parse_completion({"choices": [{"message": {"content": None}, "finish_reason": None}]})
+    assert parsed["text"] == ""
+    assert parsed["prompt_tokens"] is None
+    assert parsed["completion_tokens"] is None
+    assert parsed["finish_reason"] == ""
+
+
+def test_parse_completion_rejects_a_response_without_choices():
+    with pytest.raises(ValueError, match="sans choix"):
+        parse_completion({"error": "model not loaded"})

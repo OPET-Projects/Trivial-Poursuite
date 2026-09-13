@@ -14,6 +14,13 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import config
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -46,12 +53,8 @@ def _cpu_brand() -> str:
 
 
 def _runtime_version() -> str:
-    try:
-        import lmstudio
-
-        return f"lmstudio-python/{getattr(lmstudio, '__version__', 'unknown')}"
-    except ImportError:
-        return "lmstudio-python/absent"
+    """Protocole d'appel, raisonnement compris : il conditionne la comparabilité."""
+    return f"lmstudio-openai-api/reasoning_effort={config.LLM_REASONING_EFFORT}"
 
 
 def host_info() -> dict[str, str]:

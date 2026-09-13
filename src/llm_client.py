@@ -11,7 +11,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -64,42 +64,77 @@ class LLMResult:
     attempt: int
 
 
-class LMStudioBackend:
-    """Adaptateur du SDK lmstudio.
+# Vocabulaire du SDK lmstudio, conservé parce que les runs déjà écrits le
+# portent et que dbt détecte la troncature sur `maxPredictedTokensReached`.
+_FINISH_REASONS = {"stop": "eosFound", "length": "maxPredictedTokensReached"}
 
-    Les noms de champs de statistiques varient selon la version du SDK : on
-    les lit défensivement plutôt que de supposer un schéma.
+
+def _token_count(usage: Mapping[str, Any], name: str) -> int | None:
+    value = usage.get(name)
+    return int(value) if isinstance(value, (int, float)) else None
+
+
+def parse_completion(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Traduit une réponse chat/completions vers le contrat du backend.
+
+    Seul `content` est retenu : la réflexion éventuelle arrive à part, dans
+    `reasoning_content`, et ne doit jamais être notée comme réponse.
+    """
+    choices = payload.get("choices") or []
+    if not choices:
+        raise ValueError(f"Réponse sans choix: {payload!r:.200}")
+    choice = choices[0]
+    usage = payload.get("usage") or {}
+    finish = str(choice.get("finish_reason") or "")
+    return {
+        "text": str((choice.get("message") or {}).get("content") or ""),
+        "prompt_tokens": _token_count(usage, "prompt_tokens"),
+        "completion_tokens": _token_count(usage, "completion_tokens"),
+        "finish_reason": _FINISH_REASONS.get(finish, finish),
+    }
+
+
+class LMStudioBackend:
+    """Adaptateur de l'API compatible OpenAI du serveur LM Studio.
+
+    Le SDK lmstudio ne sait pas couper le raisonnement des modèles qui en ont
+    un (gemma-4-26b-a4b, bonsai-27b) ; l'API REST le fait via `reasoning_effort`. Sans
+    cette coupure, le protocole diffère des modèles déjà mesurés et chaque
+    appel coûte dix fois plus de jetons.
     """
 
     def __init__(self, model_name: str) -> None:
-        import lmstudio as lms
+        import requests
 
-        lms.set_sync_api_timeout(config.LMSTUDIO_TIMEOUT_SECONDS)
-        self._lms = lms
-        self._model = lms.llm(model_name)
-
-    @staticmethod
-    def _stat(stats: Any, *names: str) -> int | None:
-        for name in names:
-            value = getattr(stats, name, None)
-            if isinstance(value, (int, float)):
-                return int(value)
-        return None
+        self._session = requests.Session()
+        self._model_name = model_name
+        self._url = f"{config.LMSTUDIO_BASE_URL}/v1/chat/completions"
+        models = self._session.get(
+            f"{config.LMSTUDIO_BASE_URL}/v1/models", timeout=config.HTTP_TIMEOUT_SECONDS
+        )
+        models.raise_for_status()
+        known = {entry.get("id") for entry in models.json().get("data", [])}
+        if model_name not in known:
+            raise LookupError(f"Modèle absent de LM Studio: {model_name}. Connus: {sorted(known)}")
 
     def respond(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        chat = self._lms.Chat(system_prompt)
-        chat.add_user_message(user_prompt)
-        result = self._model.respond(
-            chat,
-            config={"temperature": config.LLM_TEMPERATURE, "maxTokens": config.LLM_MAX_TOKENS},
+        response = self._session.post(
+            self._url,
+            json={
+                "model": self._model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": config.LLM_TEMPERATURE,
+                "max_tokens": config.LLM_MAX_TOKENS,
+                "reasoning_effort": config.LLM_REASONING_EFFORT,
+                "stream": False,
+            },
+            timeout=config.LMSTUDIO_TIMEOUT_SECONDS,
         )
-        stats = getattr(result, "stats", None)
-        return {
-            "text": str(getattr(result, "content", result) or ""),
-            "prompt_tokens": self._stat(stats, "prompt_tokens_count", "promptTokensCount"),
-            "completion_tokens": self._stat(stats, "predicted_tokens_count", "predictedTokensCount"),
-            "finish_reason": str(getattr(stats, "stop_reason", "") or ""),
-        }
+        response.raise_for_status()
+        return parse_completion(response.json())
 
 
 class LLMClient:

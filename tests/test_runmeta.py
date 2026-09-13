@@ -34,3 +34,8 @@ def test_new_run_id_is_sortable_and_unique():
 def test_model_slug_rejects_unusable_names(bad):
     with pytest.raises(ValueError):
         model_slug(bad)
+
+
+def test_runtime_version_records_the_reasoning_protocol():
+    """Deux runs au raisonnement différent ne doivent pas se confondre."""
+    assert "reasoning_effort=" in host_info()["runtime_version"]

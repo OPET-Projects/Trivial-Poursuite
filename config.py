@@ -39,9 +39,13 @@ SAMPLE_SIZE = 0
 SAMPLE_SEED = 42
 
 # LM Studio
-MODEL_NAME = os.environ.get("LLM_MODEL", "google/gemma-3-12b")
+MODEL_NAME = os.environ.get("LLM_MODEL", "google/gemma-4-26b-a4b-qat")
 JUDGE_MODEL_NAME = os.environ.get("JUDGE_MODEL", MODEL_NAME)
+LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234").rstrip("/")
 LMSTUDIO_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "180"))
+# "none" aligne les modèles à raisonnement sur le protocole des modèles qui
+# n'en ont pas ; toute autre valeur rend les runs incomparables entre eux.
+LLM_REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "none")
 LLM_TEMPERATURE = 0.0
 LLM_MAX_TOKENS = 256
 LLM_MAX_ATTEMPTS = 3
