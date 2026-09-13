@@ -5,9 +5,9 @@ sur l'intégralité du corpus [Open Trivia Database](https://opentdb.com), avec
 trois variantes de prompt, une architecture médaillon et une restitution
 interactive.
 
-Matrice complète visée : environ 5 300 questions × 2 modèles × 3 variantes,
-soit à peu près 31 800 inférences, pour un coût **mesuré à 3 h 43** sur un seul
-poste. Voir [Choix des modèles](#choix-des-modèles-et-exclusion-du-raisonnement) :
+Matrice mesurée : 5 295 questions × 4 modèles × 3 variantes, soit **63 540
+inférences** en deux vagues, pour un coût d'inférence **mesuré à 3 h 43 puis
+5 h 10**. Voir [Choix des modèles](#choix-des-modèles-et-exclusion-du-raisonnement) :
 ce budget tient à une décision précise, et le premier modèle retenu le faisait
 exploser d'un facteur 19.
 
@@ -22,7 +22,7 @@ exploser d'un facteur 19.
 | Silver | `data/silver/questions.parquet` | Questions nettoyées, options mélangées par un ordre seedé |
 | Silver | `data/silver/answers/model=…/prompt_variant=…/` | Réponses des modèles, temps de réponse, provenance |
 | Silver | `data/silver/judgments/model=…/prompt_variant=…/` | Verdicts et méthode de décision |
-| Silver | `data/silver/runs/` | Métadonnées de run : poste, matériel, paramètres |
+| Silver | `data/silver/runs/` | Métadonnées de run : provenance, paramètres |
 | Gold | `data/gold/benchmark.duckdb` | Neuf marts métier construits par dbt |
 | Restitution | `app/streamlit_app.py` | Rapport interactif, sept pages |
 
@@ -41,10 +41,10 @@ sans refaire un seul appel au modèle.
 - Python 3.10 ou plus
 - [LM Studio](https://lmstudio.ai), serveur local démarré (onglet *Developer*),
   modèle chargé en mémoire
-- Environ 14 Go de RAM libre — le plus lourd des deux modèles,
-  `liquid/lfm2-24b-a2b`, pèse 13,4 Go quantisé en 4 bits. Les deux ne
-  tiennent pas ensemble en mémoire sur 24 Go, et n'ont pas à y tenir :
-  le pipeline les interroge l'un après l'autre
+- Environ 15 Go de mémoire libre — le plus lourd des modèles mesurés,
+  `google/gemma-4-26b-a4b-qat`, occupe 14,6 Go une fois chargé. Les modèles
+  n'ont jamais à tenir ensemble en mémoire : le pipeline les interroge l'un
+  après l'autre
 
 ## Installation
 
@@ -59,9 +59,11 @@ Variables reconnues (`.env`) :
 
 | Variable | Défaut | Rôle |
 | --- | --- | --- |
-| `LLM_MODEL` | `google/gemma-3-12b` | Modèle interrogé, identifiant tel qu'affiché par LM Studio |
+| `LLM_MODEL` | `google/gemma-4-26b-a4b-qat` | Modèle interrogé, identifiant tel qu'affiché par LM Studio |
 | `JUDGE_MODEL` | valeur de `LLM_MODEL` | Modèle qui arbitre les réponses ambiguës |
+| `LMSTUDIO_BASE_URL` | `http://localhost:1234` | Adresse du serveur LM Studio |
 | `LLM_TIMEOUT_SECONDS` | `180` | Délai maximum d'un appel |
+| `LLM_REASONING_EFFORT` | `none` | Raisonnement des modèles qui en ont un. Toute autre valeur rend les runs incomparables |
 
 ---
 
@@ -75,8 +77,8 @@ python run_pipeline.py
 
 # Étages séparés
 python run_pipeline.py --stages ingest transform
-python run_pipeline.py --stages enrich --model "google/gemma-3-12b"
-python run_pipeline.py --stages enrich --model "liquid/lfm2-24b-a2b"
+python run_pipeline.py --stages enrich --model "google/gemma-4-26b-a4b-qat"
+python run_pipeline.py --stages enrich --model "prism-ml/bonsai-27b"
 python run_pipeline.py --stages judge
 
 # Smoke test rapide, une seule variante
@@ -100,6 +102,14 @@ modèle d'inférence.
 ```bash
 python run_pipeline.py --stages judge                 # rejoue tous les modèles
 python run_pipeline.py --stages judge --no-llm-judge  # sans l'arbitre LLM
+```
+
+**Ajouter un modèle sans rejuger les autres.** L'étage `judge` du pipeline
+rejoue tous les modèles avec l'arbitre courant. Pour juger un seul modèle et
+laisser intacts les verdicts existants :
+
+```bash
+JUDGE_MODEL="google/gemma-4-26b-a4b-qat" python -m src.judge --model-slug prism-ml_bonsai-27b
 ```
 
 **Reprise.** L'inférence est reprenable. Relancer la même commande après une
@@ -264,11 +274,6 @@ Chaque ligne enregistre le poste et le matériel (`host`, `hardware`,
 **des temps produits par des matériels différents ne sont pas comparables**, ce
 que le dashboard applique.
 
-Le premier run complet a tourné **en entier sur une seule machine**, un Apple
-M5. Ses temps sont donc directement comparables entre modèles et entre
-variantes, et le cloisonnement par poste n'y sépare rien — il reste en place
-pour le jour où le travail sera réparti par `--shard`.
-
 ### Erreurs
 
 Un échec d'appel n'est pas une mauvaise réponse. La ligne est conservée avec
@@ -302,7 +307,7 @@ clair. Ce n'est pas de la coquetterie : voir ci-dessous.
 
 ## Choix des modèles et exclusion du raisonnement
 
-Le modèle d'inférence par défaut est **`google/gemma-3-12b`**. Il a remplacé
+Le premier modèle d'inférence mesuré est **`google/gemma-3-12b`**. Il a remplacé
 `google/gemma-4-12b-qat`, retenu à la conception, et cette substitution est la
 décision qui conditionne la faisabilité du benchmark. Elle mérite d'être
 justifiée.
@@ -362,16 +367,17 @@ Mesures sur les trois variantes, 24 appels, chauffe exclue :
 | Réponses vides en `p1` | 4 sur 10 | **0 sur 24** |
 | Appels avec raisonnement | tous | **0 sur 24** |
 | Arbitre : verdicts conformes | 3 sur 4, en 7,4–23,5 s | **4 sur 4, en 0,84 s** |
-| **Matrice complète, cumulée** | **~128 h** (~43 h/poste) | **~6,8 h** (~2,3 h/poste) |
+| **Matrice complète, cumulée** | **~128 h** | **~6,8 h** |
 
 Un facteur **19** sur le budget, et les trois défauts disparaissent ensemble.
 L'estimation de 8 à 12 h de la conception redevient tenable.
 
 ### Le second modèle
 
-`prism-ml/bonsai-27b`, retenu à la conception, **n'a jamais été téléchargé**.
-Il est remplacé par **`liquid/lfm2-24b-a2b`**, un mélange d'experts 24B à
-environ 2 milliards de paramètres actifs.
+`prism-ml/bonsai-27b`, retenu à la conception, **n'était pas téléchargé** lors
+de la première vague. Il y est remplacé par **`liquid/lfm2-24b-a2b`**, un
+mélange d'experts 24B à environ 2 milliards de paramètres actifs, puis
+réintégré dans la [seconde vague](#la-seconde-vague--couper-le-raisonnement-par-lapi).
 
 Sondé selon le même protocole, 24 appels sur les trois variantes, chauffe
 exclue :
@@ -387,56 +393,121 @@ exclue :
 
 Les trois défauts qui ont fait écarter `gemma-4-12b-qat` sont absents. Le
 modèle entre dans la matrice sans réserve, et le budget complet — les deux
-modèles, les trois variantes — s'est établi à **3 h 43 sur un seul poste**,
-2 h 05 pour `gemma-3-12b` et 1 h 38 pour `lfm2-24b-a2b`.
+modèles, les trois variantes — s'est établi à **3 h 43**, 2 h 05 pour
+`gemma-3-12b` et 1 h 38 pour `lfm2-24b-a2b`.
 
 Le contraste entre les deux est volontairement architectural — dense 12B contre
 mélange d'experts 24B-A2B — et non une variation de taille dans une même
-famille. Les deux modèles ne tiennent pas ensemble en mémoire sur 24 Go : le
-pipeline les interroge l'un après l'autre, ce que l'exécution séquentielle
-impose de toute façon.
+famille. Les modèles ne sont jamais chargés ensemble : le pipeline les interroge
+l'un après l'autre, ce que l'exécution séquentielle impose de toute façon.
+
+### La seconde vague : couper le raisonnement par l'API
+
+Deux modèles ont été ajoutés ensuite, sur le même corpus et les mêmes variantes :
+
+- **`google/gemma-4-26b-a4b-qat`**, mélange d'experts 26B à environ 4 milliards
+  de paramètres actifs, entraîné pour la quantisation 4 bits ;
+- **`prism-ml/bonsai-27b`**, 27B d'architecture Qwen 3.5, 8,5 Go sur disque.
+
+**Les deux raisonnent par défaut**, et le client de la première vague rendait
+`gemma-4-26b-a4b` inexploitable. Sondé via le SDK `lmstudio`, il émettait 42 à
+209 jetons de complétion par appel, et sa réflexion arrive balisée
+`<|channel>thought … <channel|>`, un format que `strip_reasoning` ne reconnaît
+pas : la réponse nettoyée valait `<|channel>thought` sur **6 appels sur 6**,
+avec `status = ok`. Un run lancé tel quel aurait été noté à 0 % sans une seule
+erreur visible.
+
+À la différence de `gemma-4-12b-qat`, ces modèles ont un **mode sans
+raisonnement commutable**. Le SDK ne l'expose pas ; l'API compatible OpenAI du
+serveur LM Studio l'accepte via `reasoning_effort`. Sur une même question, jetons
+de complétion dont raisonnement :
+
+| Appel | `gemma-4-26b-a4b-qat` | `bonsai-27b` | Réponse |
+| --- | --- | --- | --- |
+| Sans paramètre | 87 dont 80 | 143 dont 137 | Tungsten |
+| `reasoning_effort: "none"` | **4 dont 0** | **4 dont 0** | Tungsten |
+
+`src/llm_client.py` interroge donc désormais `/v1/chat/completions` avec
+`reasoning_effort = none`. Ce choix remet les nouveaux modèles **sous le
+protocole de la première vague** — réponse directe, sans réflexion —, ce qui
+rend les quatre modèles comparables. Deux conséquences sont tracées :
+
+- `runtime_version` porte le protocole à chaque ligne
+  (`lmstudio-openai-api/reasoning_effort=none`) : deux runs au raisonnement
+  différent ne peuvent pas se confondre ;
+- `finish_reason` est traduit dans le vocabulaire du SDK (`length` devient
+  `maxPredictedTokensReached`), sur lequel `int_results` détecte la troncature.
+  Les runs antérieurs restent lisibles sans migration.
+
+Sondés sous ce protocole, 6 appels chacun sur les trois variantes : 6 réponses
+exactes sur 6 pour les deux modèles, 2 à 4 jetons de complétion. L'inférence
+complète a pris **5 h 10**, 1 h 37 pour `gemma-4-26b-a4b` et 3 h 33 pour
+`bonsai-27b`.
+
+**Arbitre.** `gemma-3-12b` n'étant plus disponible, les deux nouveaux modèles
+sont arbitrés par `gemma-4-26b-a4b`, jugés modèle par modèle
+(`--model-slug`) pour ne pas réécrire les verdicts de la première vague. Voir
+la [limite 3](#limites-et-mesures).
 
 ### Ce qui reste dans le code
 
-`strip_reasoning` et le plafond `LLM_MAX_TOKENS = 256` sont **conservés**. Ils
-ne coûtent rien sur un modèle qui ne raisonne pas, et ils restent la seule
-protection le jour où un modèle à raisonnement entre dans la matrice. Tout
-modèle ajouté doit être sondé avant son run de production, comme les deux
-modèles retenus l'ont été.
+`strip_reasoning` et le plafond `LLM_MAX_TOKENS = 256` sont **conservés**. Avec
+l'API, la réflexion éventuelle arrive dans un champ séparé et n'est jamais
+notée ; ces deux gardes restent la protection contre un modèle qui raisonnerait
+malgré `reasoning_effort = none`. Tout modèle ajouté doit être sondé avant son
+run de production, comme les quatre modèles mesurés l'ont été.
 
 ---
 
-## Résultats du premier run complet
+## Résultats
 
-Run du 11 septembre 2026, Apple M5, 24 Go. **31 770 inférences, aucune erreur
-de transport** — `mart_errors` est vide. Inférence 3 h 43, collecte 40 min,
-jugement environ 55 min, dont 8 329 appels à l'arbitre pour 1 187 verdicts
-positifs retenus.
+Deux vagues, même corpus, mêmes variantes, même protocole sans raisonnement :
+
+| Vague | Date | Modèles | Inférence | Jugement |
+| --- | --- | --- | --- | --- |
+| 1 | 11 septembre 2026 | `gemma-3-12b`, `lfm2-24b-a2b` | 3 h 43 | ~55 min |
+| 2 | 13 septembre 2026 | `gemma-4-26b-a4b-qat`, `bonsai-27b` | 5 h 10 | 46 min |
+
+**63 540 inférences, aucune erreur de transport** — `mart_errors` est vide.
 
 | Modèle | strict | permissif | vides | tronqués |
 | --- | --- | --- | --- | --- |
-| **`gemma-3-12b`** | **58,2 %** | **66,1 %** | 0 | 0 |
+| **`gemma-4-26b-a4b-qat`** | **63,1 %** | **70,3 %** | 1 | 11 |
+| `gemma-3-12b` | 58,2 % | 66,1 % | 0 | 0 |
+| `bonsai-27b` | 47,8 % | 52,9 % | 0 | 1 |
 | `lfm2-24b-a2b` | 44,9 % | 52,7 % | 1 | 4 |
 
-`gemma-3-12b` l'emporte de 13,3 points, et l'écart tient sur les deux
-dénominateurs. Il est aussi le seul des deux à ne produire ni réponse vide ni
-troncature sur ses 15 885 appels.
+`gemma-4-26b-a4b` prend la tête avec 4,2 points d'avance sur `gemma-3-12b` en
+permissif, et l'écart tient sur les deux dénominateurs. `bonsai-27b`, malgré sa
+taille nominale, ne dépasse `lfm2-24b-a2b` que de 0,2 point en permissif. Les
+deux familles Gemma dominent la matrice.
 
 | Modèle | Variante | strict | permissif | Longueur de réponse |
 | --- | --- | --- | --- | --- |
+| `gemma-4-26b-a4b-qat` | `p1` | 78,8 % | 78,8 % | 1,1 car. |
+| `gemma-4-26b-a4b-qat` | `p2` | 54,9 % | 66,1 % | 15,3 car. |
+| `gemma-4-26b-a4b-qat` | `p3` | 55,6 % | 66,1 % | 11,2 car. |
 | `gemma-3-12b` | `p1` | 70,7 % | 70,7 % | 1,0 car. |
 | `gemma-3-12b` | `p2` | 52,4 % | 64,1 % | 9,6 car. |
 | `gemma-3-12b` | `p3` | 51,5 % | 63,4 % | 9,1 car. |
+| `bonsai-27b` | `p1` | 66,0 % | 66,0 % | 1,0 car. |
+| `bonsai-27b` | `p2` | 38,8 % | 46,6 % | 11,3 car. |
+| `bonsai-27b` | `p3` | 38,6 % | 46,1 % | 9,9 car. |
 | `lfm2-24b-a2b` | `p1` | 61,0 % | 61,0 % | 1,0 car. |
 | `lfm2-24b-a2b` | `p2` | 36,0 % | 49,4 % | 25,5 car. |
 | `lfm2-24b-a2b` | `p3` | 37,8 % | 47,7 % | 9,9 car. |
 
+En `p1`, `gemma-4-26b-a4b` est le seul modèle à sortir du format lettré : sur
+trois questions, il refuse de choisir (« None of the options provided are
+correct… »). Ces réponses tombent en `no_match` et comptent fausses.
+
 ### L'ingénierie de prompt n'a rien apporté
 
 `p3` devait battre `p2` : c'était l'hypothèse qui justifiait la variante. En
-accuracy permissive elle est **plus mauvaise pour les deux modèles**, de 0,7
-point sur `gemma-3-12b` et de 1,7 point sur `lfm2-24b-a2b`. Le résultat est
-négatif et il porte sur 10 590 appels par modèle.
+accuracy permissive elle **ne fait mieux sur aucun des quatre modèles** : moins
+0,7 point sur `gemma-3-12b`, moins 1,7 sur `lfm2-24b-a2b`, moins 0,5 sur
+`bonsai-27b`, égalité sur `gemma-4-26b-a4b`. Le résultat est négatif et il
+porte sur 10 590 appels par modèle.
 
 La nuance est ailleurs. Sur `lfm2-24b-a2b`, la consigne renforcée fait tomber la
 longueur moyenne de réponse de 25,5 à 9,9 caractères et gagne 1,8 point en
@@ -448,21 +519,26 @@ précisément ce que l'écart strict/permissif est là pour distinguer.
 
 Part des choix par position, sur les QCM à quatre options :
 
-| Position | `gemma-3-12b` | `lfm2-24b-a2b` |
-| --- | --- | --- |
-| A | 25,4 % | 23,7 % |
-| B | 27,7 % | 26,6 % |
-| C | 27,5 % | 25,5 % |
-| **D** | **19,4 %** | 24,0 % |
+| Position | `gemma-4-26b-a4b-qat` | `gemma-3-12b` | `bonsai-27b` | `lfm2-24b-a2b` |
+| --- | --- | --- | --- | --- |
+| A | 22,2 % | 25,4 % | 22,7 % | 23,7 % |
+| B | 26,9 % | 27,7 % | 29,9 % | 26,6 % |
+| C | 27,6 % | 27,5 % | 28,0 % | 25,5 % |
+| **D** | 23,2 % | **19,4 %** | **19,5 %** | 24,0 % |
 
-`gemma-3-12b` sous-choisit la dernière option d'environ 5 points ;
-`lfm2-24b-a2b` est équilibré. Le mélange seedé répartissant les bonnes réponses
-entre 24 et 26 % par position, l'écart est une propriété du modèle et non des
-données. C'est la mesure que le mélange seedé rendait possible.
+`gemma-3-12b` et `bonsai-27b` sous-choisissent la dernière option d'environ
+5 points ; `lfm2-24b-a2b` et `gemma-4-26b-a4b` sont proches de l'équilibre. Le
+mélange seedé répartissant les bonnes réponses entre 24 et 26 % par position,
+l'écart est une propriété du modèle et non des données. C'est la mesure que le
+mélange seedé rendait possible.
+
+Le biais le plus fort est sur les **vrai/faux** : `bonsai-27b` choisit la
+seconde option dans **62,3 %** des cas, alors qu'elle n'est la bonne réponse que
+dans 46,1 % des questions. Les trois autres modèles restent entre 47 et 53 %.
 
 ### Le mode ouvert est dominé par `no_match`
 
-De 26,8 % à 40,6 % des lignes selon le modèle et la variante terminent la
+De 25,0 % à 41,7 % des lignes selon le modèle et la variante terminent la
 cascade sans conclusion, et sont comptées fausses. C'est le poste qui explique
 l'essentiel de l'écart entre `p1` et les variantes ouvertes.
 
@@ -478,13 +554,25 @@ Deux niveaux de la cascade se lisent de travers si on ignore leur construction :
 
 ### Latence
 
-`lfm2-24b-a2b` est **plus rapide et moins bon** : médiane de 0,252 à 0,361 s
-contre 0,418 à 0,511 s, et 25,4 jetons par seconde en `p2` contre 8,2. Son
-architecture à mélange d'experts, environ 2 milliards de paramètres actifs sur
-24, se lit directement dans le débit.
+Temps de réponse médian par appel, selon la variante :
 
-> Ces chiffres sont ceux d'**un** run, sur **un** corpus, avec **deux** modèles
-> locaux quantisés en 4 bits. Ils ne disent rien des mêmes modèles en pleine
+| Modèle | médiane | jetons/s en `p2` |
+| --- | --- | --- |
+| `gemma-4-26b-a4b-qat` | 0,266 à 0,387 s | 17,3 |
+| `lfm2-24b-a2b` | 0,252 à 0,361 s | 25,4 |
+| `gemma-3-12b` | 0,418 à 0,511 s | 8,2 |
+| `bonsai-27b` | 0,559 à 1,026 s | 7,2 |
+
+Les deux mélanges d'experts, environ 2 et 4 milliards de paramètres actifs, sont
+les plus rapides, et cela se lit directement dans le débit. `gemma-4-26b-a4b`
+cumule le meilleur score et la deuxième latence la plus basse. `bonsai-27b` est
+le plus lent sur les trois variantes.
+
+Les deux vagues sont enregistrées sous deux valeurs de `host` distinctes :
+`mart_latency` et le dashboard les présentent donc dans des groupes séparés.
+
+> Ces chiffres sont ceux de **deux** vagues, sur **un** corpus, avec **quatre**
+> modèles locaux quantisés. Ils ne disent rien des mêmes modèles en pleine
 > précision, ni d'un autre corpus que les questions vérifiées d'OpenTDB.
 
 ---
@@ -493,9 +581,8 @@ architecture à mélange d'experts, environ 2 milliards de paramètres actifs su
 
 > Les chiffres de **sonde** cités plus haut — ceux qui ont motivé le choix des
 > modèles — proviennent de quelques dizaines d'appels réalisés pendant le
-> développement : `gemma-4-12b-qat` et `gemma-3-12b` sur un M1 Pro,
-> `lfm2-24b-a2b` sur un M5. Ils ne doivent pas être confondus avec les
-> résultats du run complet, rapportés à la section précédente.
+> développement. Ils ne doivent pas être confondus avec les résultats des runs
+> complets, rapportés à la section précédente.
 
 **1. Les verdicts négatifs de l'arbitre LLM ne sont pas observables.**
 
@@ -506,11 +593,12 @@ résidus. Les lignes que
 acceptées, pas celles où il a pu se tromper. L'effet net est une
 **sous-estimation de l'accuracy permissive, sans trace**.
 
-Le run complet le confirme : `mart_matching_impact` donne 100 % d'accuracy
+La première vague le confirme : `mart_matching_impact` donne 100 % d'accuracy
 permissive et 0 % de stricte sur les 1 187 lignes `llm_judge`, alors que
 l'arbitre a été appelé 8 329 fois. Les 7 142 appels restants — verdicts
 négatifs, sincères ou tronqués — sont indiscernables des autres résidus dans
-`no_match`.
+`no_match`. La seconde vague présente la même signature sur ses 760 lignes
+`llm_judge`.
 
 Rendre ces lignes visibles demanderait une valeur de cascade dédiée au verdict
 négatif, ce qui élargirait l'énumération de `match_method` contrôlée par
@@ -519,21 +607,26 @@ de l'étage `llm_judge`.
 
 **2. Les réponses vides restent comptées comme fausses.**
 
-Le run complet en produit **5 sur 31 770** — une réponse vide et quatre
-troncatures, toutes sur `lfm2-24b-a2b`. L'effet est négligeable ici, mais la
-mécanique est intacte et resservira si un modèle tronqué entre un jour dans la
-matrice. Une réponse vide en `status = ok` entre au
+Les deux vagues en produisent **18 sur 63 540** — 2 réponses vides et 16
+troncatures : 12 sur `gemma-4-26b-a4b`, 5 sur `lfm2-24b-a2b`, 1 sur
+`bonsai-27b`. L'effet est
+négligeable ici, mais la mécanique est intacte et resservira si un modèle
+fortement tronqué entre un jour dans la matrice. Une réponse vide en `status = ok` entre au
 dénominateur comme une réponse fausse. C'est la raison d'être des colonnes `n_empty` et `n_truncated`,
 et du dénominateur alternatif `n_scorable - n_empty` : le dashboard affiche les
 trois, et une accuracy qui confond « le modèle s'est trompé » et « le modèle a
 été tronqué » ne mesure rien.
 
-**3. Aucun chiffre du dashboard ne provient d'un benchmark réel à ce jour.**
+**3. Les deux vagues n'ont pas le même arbitre.**
 
-Le silver est vide dans ce dépôt : aucun run de production n'a été mené. Tout ce
-qui a été vérifié — compilation des modèles dbt, typage, contrats, forme des
-agrégats, rendu des sept pages — l'a été sur des **fixtures synthétiques**. La
-chaîne technique est validée ; les résultats du benchmark restent à produire.
+La première vague est arbitrée par `gemma-3-12b`, la seconde par
+`gemma-4-26b-a4b-qat` ; la colonne `judge_model` le trace ligne à ligne.
+L'arbitre ne retient que le résidu de la cascade — de 3,0 % à 6,2 % des lignes
+selon le modèle et la variante ouverte —, et l'accuracy stricte ne dépend pas de
+lui. L'écart permissif entre deux modèles de vagues différentes porte donc une
+incertitude bornée par cette part. Rejouer `python -m src.judge` sans filtre
+unifierait l'arbitre, au prix d'une réécriture des verdicts de la première
+vague.
 
 ---
 
@@ -547,7 +640,7 @@ chaîne technique est validée ; les résultats du benchmark restent à produire
 | `src/ingest_opentdb.py` | Collecte par catégorie vers la couche bronze |
 | `src/transform_silver.py` | Nettoyage, mélange seedé des options |
 | `src/prompts.py` | Registre versionné des trois variantes |
-| `src/llm_client.py` | Appel au runtime local, chronométrage, jetons |
+| `src/llm_client.py` | Appel à l'API locale de LM Studio, chronométrage, jetons |
 | `src/enrich_llm.py` | Inférence reprenable, écriture partitionnée |
 | `src/scoring.py` | Primitives de comparaison |
 | `src/judge.py` | Cascade de jugement |
@@ -562,13 +655,13 @@ chaîne technique est validée ; les résultats du benchmark restent à produire
 ## Tests
 
 ```bash
-python -m pytest -q                                   # 198 tests
+python -m pytest -q                                   # 205 tests
 cd dbt_project && dbt build --profiles-dir .          # 13 modèles, 43 tests
 ```
 
-La suite pytest ne touche ni le réseau ni LM Studio : les étages sont doublés,
-et le module `lmstudio` n'est jamais importé. Elle est donc exécutable sur une
-machine sans modèle installé.
+La suite pytest ne touche ni le réseau ni LM Studio : le backend est doublé, et
+la traduction des réponses de l'API est testée sur des charges construites. Elle
+est donc exécutable sans serveur ni modèle installé.
 
 Les tests dbt exigent une couche silver — utiliser le générateur de fixtures
 ci-dessus si aucun run n'a été mené.

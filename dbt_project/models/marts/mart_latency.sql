@@ -1,9 +1,8 @@
 -- Latence, cloisonnée par poste.
 --
 -- Comparer des temps entre matériels différents ne mesure rien, d'où `host` et
--- `hardware` dans la clé de groupe. Le premier run complet a tourné sur une
--- seule machine, donc le groupe ne sépare rien aujourd'hui ; il tient dès que
--- le travail est réparti par `--shard`.
+-- `hardware` dans la clé de groupe, qui tient dès que le travail est réparti
+-- par `--shard`.
 -- Les appels de chauffe sont exclus, le premier appel d'une instance payant
 -- des coûts qui ne se reproduisent pas.
 --
