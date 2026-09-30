@@ -36,6 +36,235 @@ sans refaire un seul appel au modèle.
 
 ---
 
+## Déroulé complet, de A à Z
+
+Ce parcours reproduit le benchmark publié, du clone du dépôt jusqu'au
+dashboard. Chaque étape dit ce qu'elle fait, pourquoi, ce qu'elle produit et
+comment vérifier qu'elle a réussi ; les sections suivantes détaillent la
+mécanique. Pour voir l'interface sans lancer d'inférence, voir
+[Voir le dashboard sans lancer d'inférence](#voir-le-dashboard-sans-lancer-dinférence).
+
+| # | Étape | Produit | Durée mesurée |
+| --- | --- | --- | --- |
+| 0 | Préparer le poste | `.venv`, `.env`, LM Studio | — |
+| 1 | Vérifier la suite de tests | — | — |
+| 2 | Collecter le corpus | bronze | ~40 min |
+| 3 | Nettoyer et mélanger les options | silver `questions.parquet` | — |
+| 4 | Sonder chaque modèle | — | quelques minutes |
+| 5 | Inférer, modèle par modèle | silver `answers/` | 1 h 37 à 3 h 33 par modèle |
+| 6 | Juger les réponses | silver `judgments/` | 46 à 55 min par vague |
+| 7 | Construire la couche gold | `benchmark.duckdb` | — |
+| 8 | Lire les résultats | dashboard | — |
+
+### Étape 0 — Préparer le poste
+
+Installer l'environnement Python et le fichier `.env` comme décrit dans
+[Installation](#installation), puis préparer LM Studio :
+
+1. télécharger les quatre modèles de la matrice : `google/gemma-3-12b`,
+   `liquid/lfm2-24b-a2b`, `google/gemma-4-26b-a4b-qat`, `prism-ml/bonsai-27b` ;
+2. démarrer le serveur local (onglet *Developer*, port 1234 par défaut).
+
+**Pourquoi.** Tout le benchmark tourne en local : aucune clé d'API, aucun coût
+par appel, et un protocole identique pour les quatre modèles. Le client refuse
+de démarrer si le modèle demandé n'est pas listé par `/v1/models` : une faute de
+frappe dans un identifiant échoue immédiatement, pas après des heures.
+
+### Étape 1 — Vérifier la suite de tests
+
+```bash
+python -m pytest -q
+```
+
+**Pourquoi.** La suite n'appelle ni le réseau ni un modèle : elle valide en
+quelques secondes les primitives de comparaison, la cascade de jugement, le
+mélange des options et la reprise. Une régression détectée ici coûte une
+minute ; détectée après l'inférence, elle coûte une journée.
+
+**Attendu :** 205 tests passés.
+
+### Étape 2 — Collecter le corpus
+
+```bash
+python run_pipeline.py --stages ingest
+```
+
+**Ce que ça fait.** Le scraper parcourt les 24 catégories d'OpenTDB, 50
+questions au plus par requête, à raison d'une requête toutes les 5,1 s. Quand
+une catégorie arrive en fin de stock, il réduit le montant demandé
+(50 → 25 → 10 → 5 → 1) avant de conclure qu'elle est épuisée. Chaque question
+reçoit dès cette étape un identifiant stable, `question_id`.
+
+**Pourquoi.** L'API ne propose ni pagination ni export : le *session token* est
+le seul moyen de tout récupérer sans doublons, et elle renvoie une réponse vide
+dès qu'on demande plus que ce qui reste. Sans la dégradation du montant, la
+queue de chaque catégorie serait perdue. Détails dans [Collecte](#collecte).
+
+**Produit :**
+- `data/bronze/questions_raw.csv`, les questions brutes ;
+- `data/bronze/_responses/cat*.jsonl`, le journal intégral des réponses d'API ;
+- `data/bronze/ingest_checkpoint.json`, l'état de la collecte.
+
+**Durée :** le run de référence a journalisé 477 requêtes, soit environ 40 min
+au rythme imposé. La collecte est reprenable : relancer la commande après une
+interruption repart du checkpoint.
+
+**Attendu :** `ingest_checkpoint.json` indique `"status": "complete"` et
+`"n_questions": 5295`.
+
+### Étape 3 — Nettoyer et mélanger les options
+
+```bash
+python run_pipeline.py --stages transform
+```
+
+**Ce que ça fait.** Décode les champs, normalise les réponses, dédoublonne les
+propositions identiques, puis mélange les options avec un générateur seedé par
+`question_id`. La position de la bonne réponse est enregistrée.
+
+**Pourquoi.** Un ordre alphabétique aurait placé `False` toujours en premier et
+trié les réponses numériques par grandeur : le biais de position des modèles se
+serait confondu avec le contenu des questions. Le mélange seedé est
+reproductible à l'identique et rend le biais de position mesurable. Détails
+dans [Ordre des options](#ordre-des-options).
+
+**Produit :** `data/silver/questions.parquet`.
+
+**Attendu :** 5 295 lignes.
+
+```bash
+python -c "import pandas as pd; print(len(pd.read_parquet('data/silver/questions.parquet')))"
+```
+
+### Étape 4 — Sonder chaque modèle
+
+Avant tout run complet, charger le modèle dans LM Studio et lancer un
+échantillon :
+
+```bash
+python run_pipeline.py --stages enrich --model "google/gemma-3-12b" --sample-size 20
+```
+
+Vérifier dans les réponses produites qu'elles sont non vides, courtes (2 à 4
+jetons de complétion) et sans trace de raisonnement. Les réponses de
+l'échantillon sont conservées : l'inférence étant reprenable, le run complet
+les compte comme acquises et ne les redemande pas.
+
+**Pourquoi.** C'est l'étape qui a sauvé le projet. Le premier modèle retenu,
+`gemma-4-12b-qat`, raisonnait avant de répondre : 214 jetons médians pour une
+réponse d'un caractère, 4 réponses vides sur 10, et un budget estimé à 128 h au
+lieu de 6,8 h. Plus tard, `gemma-4-26b-a4b` sans `reasoning_effort = none` aurait
+été noté à 0 % sans une seule erreur visible. Un sondage de quelques minutes
+détecte ces deux cas. Détails dans
+[Choix des modèles](#choix-des-modèles-et-exclusion-du-raisonnement).
+
+### Étape 5 — Inférer, modèle par modèle
+
+Pour chacun des quatre modèles : le charger dans LM Studio, décharger le
+précédent, puis lancer l'inférence sur les trois variantes.
+
+```bash
+python run_pipeline.py --stages enrich --model "google/gemma-3-12b"
+python run_pipeline.py --stages enrich --model "liquid/lfm2-24b-a2b"
+python run_pipeline.py --stages enrich --model "google/gemma-4-26b-a4b-qat"
+python run_pipeline.py --stages enrich --model "prism-ml/bonsai-27b"
+```
+
+**Ce que ça fait.** Pose chacune des 5 295 questions sous les trois
+[variantes de prompt](#variantes-de-prompt), soit 15 885 appels par modèle, en
+séquence. Chaque ligne enregistre la réponse brute et nettoyée, le temps de
+réponse, les jetons, le motif de fin et la provenance du run.
+
+**Pourquoi ainsi.**
+- **Un modèle à la fois** : ils n'ont jamais à tenir ensemble en mémoire.
+- **En séquence** : paralléliser mettrait les requêtes en file dans LM Studio
+  et rendrait `response_time` ininterprétable. Voir
+  [Mesure du temps](#mesure-du-temps).
+- **Sans raisonnement** (`LLM_REASONING_EFFORT=none`) : c'est ce qui rend les
+  quatre modèles comparables.
+- **Reprenable** : une interruption ne perd rien, relancer la même commande
+  reprend là où le run s'est arrêté. Un appel en échec est conservé en
+  `status = error` et repasse au run suivant.
+
+**Produit :**
+- `data/silver/answers/model=…/prompt_variant=…/`, une partition par modèle et
+  variante ;
+- `data/silver/runs/run-….json`, les métadonnées de chaque run.
+
+**Durée mesurée :** `lfm2-24b-a2b` 1 h 38, `gemma-4-26b-a4b` 1 h 37,
+`gemma-3-12b` 2 h 05, `bonsai-27b` 3 h 33.
+
+**Attendu :** dans chaque fichier de `data/silver/runs/`, `"error": 0` dans
+`counters` ; 15 885 réponses par modèle au total.
+
+### Étape 6 — Juger les réponses
+
+Charger le modèle arbitre dans LM Studio, puis juger chaque modèle :
+
+```bash
+# Vague 1, arbitrée par gemma-3-12b
+JUDGE_MODEL="google/gemma-3-12b" python -m src.judge --model-slug google_gemma-3-12b
+JUDGE_MODEL="google/gemma-3-12b" python -m src.judge --model-slug liquid_lfm2-24b-a2b
+
+# Vague 2, arbitrée par gemma-4-26b-a4b-qat
+JUDGE_MODEL="google/gemma-4-26b-a4b-qat" python -m src.judge --model-slug google_gemma-4-26b-a4b-qat
+JUDGE_MODEL="google/gemma-4-26b-a4b-qat" python -m src.judge --model-slug prism-ml_bonsai-27b
+```
+
+Ces commandes reproduisent les arbitres des résultats publiés. Pour un seul
+arbitre sur les quatre modèles, charger ce modèle et lancer
+`python run_pipeline.py --stages judge`, qui rejuge tout.
+
+**Ce que ça fait.** Passe chaque réponse dans une
+[cascade à huit niveaux](#décision-de-justesse) : correspondance booléenne,
+exacte, par lettre, par option, approchée, puis arbitrage LLM sur le résidu
+seulement. Le niveau qui conclut est enregistré dans `match_method`.
+
+**Pourquoi séparé de l'inférence.** L'inférence coûte des heures et ne change
+jamais ; le jugement coûte des minutes et s'ajuste (seuil de similarité,
+prompt de l'arbitre). Changer un critère se rejoue sans un seul nouvel appel au
+modèle interrogé. L'arbitre n'est appelé que sur le résidu, 3 à 6 % des lignes.
+
+**Produit :** `data/silver/judgments/model=…/prompt_variant=…/`.
+
+**Durée mesurée :** ~55 min pour la vague 1, 46 min pour la vague 2.
+
+**Attendu :** douze partitions, quatre modèles × trois variantes.
+
+### Étape 7 — Construire la couche gold
+
+```bash
+cd dbt_project
+dbt deps
+dbt build --profiles-dir .
+cd ..
+```
+
+**Ce que ça fait.** dbt lit les parquets silver, les joint en `int_results`
+(une ligne par question × modèle × variante), puis construit les
+[neuf marts](#couche-gold) et exécute leurs tests.
+
+**Pourquoi.** Chaque question d'analyse — quel modèle gagne, sur quels
+domaines, avec quel prompt, avec quel biais — a son mart, testé et versionné
+avec le code. Le dashboard n'agrège rien lui-même : il lit des tables déjà
+correctes.
+
+**Produit :** `data/gold/benchmark.duckdb`.
+
+**Attendu :** 13 modèles construits, 43 tests passés, `mart_errors` vide.
+
+### Étape 8 — Lire les résultats
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+Le dashboard s'ouvre sur `http://localhost:8501` et lit la base gold. Les
+chiffres de référence et leur lecture sont dans [Résultats](#résultats) ; les
+réserves qui les bornent, dans [Limites et mesures](#limites-et-mesures).
+
+---
+
 ## Prérequis
 
 - Python 3.10 ou plus
