@@ -797,12 +797,9 @@ ont été discutés et construits ensemble.
 
 Le travail a suivi trois principes :
 
-- **Concevoir avant de coder.** Une spécification fixe les décisions et les
-  risques ([`docs/superpowers/specs/`](docs/superpowers/specs/)), un plan la
-  découpe en seize tâches testables ([`docs/superpowers/plans/`](docs/superpowers/plans/)).
-  Le journal de suivi et les revues de chaque tâche sont versionnés sous
-  [`.superpowers/sdd/`](.superpowers/sdd/) : chaque arbitrage y est daté et
-  justifié.
+- **Concevoir avant de coder.** Une spécification a d'abord fixé les
+  décisions, les risques et le périmètre, puis un plan l'a découpée en seize
+  tâches testables, livrées et relues une à une.
 - **Des contrats entre étages.** Les schémas des fichiers bronze et silver
   servent d'interface : chaque étage peut être développé et testé sur des
   fixtures sans attendre l'étage précédent, et sans réseau ni modèle.
