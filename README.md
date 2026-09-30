@@ -13,6 +13,31 @@ exploser d'un facteur 19.
 
 ---
 
+## Démarrage rapide
+
+Le dépôt contient les données complètes du benchmark publié : bronze, silver
+et la base gold `data/gold/benchmark.duckdb`. Le dashboard se lance donc sans
+LM Studio, sans inférence et sans dbt :
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app/streamlit_app.py
+```
+
+> [!WARNING]
+> **Les données sont versionnées uniquement pour la correction.** Elles ont été
+> poussées pour que le rapport soit consultable dès le clone, sans les 9 heures
+> d'inférence qu'il a coûté. Ce n'est pas la pratique du projet : les données
+> sont des artefacts produits par le pipeline, et n'ont normalement pas leur
+> place dans un dépôt de code.
+>
+> Relancer un étage du pipeline réécrit ces fichiers. Pour revenir aux données
+> publiées : `git restore data/ && git clean -fd data/`.
+
+---
+
 ## Architecture médaillon
 
 | Couche | Emplacement | Contenu |
@@ -41,8 +66,9 @@ sans refaire un seul appel au modèle.
 Ce parcours reproduit le benchmark publié, du clone du dépôt jusqu'au
 dashboard. Chaque étape dit ce qu'elle fait, pourquoi, ce qu'elle produit et
 comment vérifier qu'elle a réussi ; les sections suivantes détaillent la
-mécanique. Pour voir l'interface sans lancer d'inférence, voir
-[Voir le dashboard sans lancer d'inférence](#voir-le-dashboard-sans-lancer-dinférence).
+mécanique. Pour seulement consulter les résultats, le
+[démarrage rapide](#démarrage-rapide) suffit : les données du dépôt sont
+celles que ce parcours produit.
 
 | # | Étape | Produit | Durée mesurée |
 | --- | --- | --- | --- |
@@ -364,19 +390,22 @@ cd ..
 streamlit run app/streamlit_app.py
 ```
 
-> **Sans couche gold, le dashboard s'ouvre sur un message d'erreur** nommant la
-> commande dbt à lancer — c'est l'état d'un dépôt fraîchement cloné, et c'est
-> normal. Les étapes 1 et 2 doivent avoir été exécutées avant.
+Le dépôt fournit la base gold du benchmark publié : le dashboard s'ouvre
+directement. Sans couche gold, par exemple après l'avoir supprimée pour tout
+reconstruire, il s'ouvre sur un message d'erreur nommant la commande dbt à
+lancer.
 
-### Voir le dashboard sans lancer d'inférence
+### Exercer la chaîne sur des données synthétiques
 
-Un générateur de silver synthétique permet d'exercer dbt et l'interface sans les
-dizaines d'heures d'appels au modèle :
+Un générateur de silver synthétique permet d'exercer dbt et l'interface sur un
+jeu minuscule et entièrement maîtrisé. Il remplace le silver du dépôt, d'où le
+`--force` ; la dernière commande restaure les données publiées :
 
 ```bash
-python tests/fixtures/make_fixture_silver.py
+python tests/fixtures/make_fixture_silver.py --force
 cd dbt_project && dbt build --profiles-dir . && cd ..
 streamlit run app/streamlit_app.py
+git restore data/ && git clean -fd data/
 ```
 
 Le jeu couvre délibérément les cas qui rendent les marts interprétables :
@@ -944,5 +973,7 @@ La suite pytest ne touche ni le réseau ni LM Studio : le backend est doublé, e
 la traduction des réponses de l'API est testée sur des charges construites. Elle
 est donc exécutable sans serveur ni modèle installé.
 
-Les tests dbt exigent une couche silver — utiliser le générateur de fixtures
-ci-dessus si aucun run n'a été mené.
+Les tests dbt s'exécutent sur la couche silver du dépôt. `dbt build` réécrit
+alors `data/gold/benchmark.duckdb` : les tables sont les mêmes, mais le fichier
+binaire change et apparaît modifié dans git. `git restore data/gold/` le ramène
+à la version publiée.
