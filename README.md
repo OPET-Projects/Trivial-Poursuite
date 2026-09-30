@@ -269,7 +269,8 @@ réserves qui les bornent, dans [Limites et mesures](#limites-et-mesures).
 
 - Python 3.10 ou plus
 - [LM Studio](https://lmstudio.ai), serveur local démarré (onglet *Developer*),
-  modèle chargé en mémoire
+  modèle chargé en mémoire. Le pipeline l'appelle par son API REST, pas par le
+  SDK Python : voir [l'écart assumé à la consigne](#la-seconde-vague--couper-le-raisonnement-par-lapi)
 - Environ 15 Go de mémoire libre — le plus lourd des modèles mesurés,
   `google/gemma-4-26b-a4b-qat`, occupe 14,6 Go une fois chargé. Les modèles
   n'ont jamais à tenir ensemble en mémoire : le pipeline les interroge l'un
@@ -661,7 +662,19 @@ de complétion dont raisonnement :
 `src/llm_client.py` interroge donc désormais `/v1/chat/completions` avec
 `reasoning_effort = none`. Ce choix remet les nouveaux modèles **sous le
 protocole de la première vague** — réponse directe, sans réflexion —, ce qui
-rend les quatre modèles comparables. Deux conséquences sont tracées :
+rend les quatre modèles comparables.
+
+> **Écart assumé à la consigne.** Le sujet demande d'utiliser l'API Python de
+> l'outil. La première vague l'a fait : ses 31 770 inférences portent
+> `runtime_version = lmstudio-python/1.5.0`. Le client actuel l'a quittée pour
+> l'API REST que le même serveur LM Studio expose, appelée depuis Python avec
+> `requests`, pour une seule raison : le SDK ne permet pas de couper le
+> raisonnement. Le garder rendait la seconde vague soit inexploitable (réponse
+> notée à 0 % sans erreur visible), soit incomparable à la première. Le runtime,
+> les modèles et l'exécution locale restent ceux qu'impose le sujet ; seul le
+> canal d'appel change, et il est tracé sur chaque ligne.
+
+Deux conséquences sont tracées :
 
 - `runtime_version` porte le protocole à chaque ligne
   (`lmstudio-openai-api/reasoning_effort=none`) : deux runs au raisonnement
