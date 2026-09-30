@@ -137,11 +137,11 @@ models:
       ce que l'accuracy doit à l'appariement plutôt qu'au modèle. Deux lectures
       attendues — la part de `choice_letter` en mode 'open', où le modèle n'a
       jamais vu les options et où une réponse d'un caractère peut tomber juste
-      par accident ; et la part de `llm_judge`, qui ne compte que les verdicts
-      que le juge a acceptés. Le juge subit la même troncature de raisonnement
-      que l'inférence, mais un verdict négatif — sincère ou tronqué — retombe en
-      `no_match` : ces lignes-là ne sont pas isolables par `match_method`, et
-      l'effet est une sous-estimation de l'accuracy permissive.
+      par accident ; et la répartition des appels à l'arbitre LLM entre
+      `llm_judge` (accepté), `llm_judge_rejected` (refusé) et `llm_judge_failed`
+      (verdict illisible : échec, troncature, réponse hors YES/NO). Cette
+      dernière part borne la sous-estimation de l'accuracy permissive due au
+      juge.
     tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:

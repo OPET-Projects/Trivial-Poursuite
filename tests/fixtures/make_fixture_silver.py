@@ -21,7 +21,10 @@ eux, les agrégats sont dégénérés et un mart peut compiler en mentant :
 - une réponse lettrée en mode ouvert, où le modèle n'a jamais vu les options et
   tombe juste par accident — le biais que `mart_matching_impact` doit exposer ;
 - un appel de chauffe, pour que les clauses `filter (where not is_warmup)`
-  soient réellement exercées.
+  soient réellement exercées ;
+- les trois issues de l'arbitre LLM — accepté, refusé, illisible — rendues
+  par un juge scripté, pour que `llm_judge`, `llm_judge_rejected` et
+  `llm_judge_failed` traversent réellement le contrôle d'énumération de dbt.
 
 Usage :
     python tests/fixtures/make_fixture_silver.py [--force]
@@ -47,7 +50,8 @@ if str(ROOT) not in sys.path:
 import config
 from src.enrich_llm import ANSWER_COLUMNS, _ANSWER_DTYPES
 from src.io_utils import atomic_write_dataframe
-from src.judge import run_judge
+from src.judge import JUDGE_FAILED, JUDGE_NO, JUDGE_YES, run_judge
+from src.scoring import normalize
 from src.transform_silver import SILVER_COLUMNS
 
 # (id, categorie, type, difficulte, question, correct, choices, position, numeric)
@@ -114,11 +118,17 @@ BASE_ANSWERS = {
 # Écarts par modèle, pour que les deux ne rendent pas des marts identiques.
 # (variante, question_id) -> (ai_answer, status, finish_reason)
 OVERRIDES = {
+    "google_gemma-3-12b": {
+        # Faux hors des options, qu'aucun étage lexical ne tranche : l'arbitre le refuse.
+        ("p3_open_guided", "q4"): ("Brisbane", "ok", "eosFound"),
+    },
     "liquid_lfm2-24b-a2b": {
         ("p1_constrained_mcq", "q5"): ("A", "ok", "eosFound"),
         ("p1_constrained_mcq", "q1"): ("C", "ok", "eosFound"),
         ("p2_open_minimal", "q1"): ("Leonardo", "ok", "eosFound"),
         ("p3_open_guided", "q4"): ("", "ok", "maxPredictedTokensReached"),
+        # Paraphrase juste qu'aucun étage lexical ne rattrape : l'arbitre l'accepte.
+        ("p3_open_guided", "q1"): ("The artist from Vinci", "ok", "eosFound"),
     },
 }
 
@@ -215,6 +225,25 @@ def build_answers() -> None:
             print(f"[fixture] answers -> {target} ({len(frame)} lignes)")
 
 
+class ScriptedJudge:
+    """Arbitre déterministe : une issue fixée par réponse résiduelle.
+
+    Le vrai juge demanderait LM Studio. Celui-ci rend les trois issues possibles
+    sur les résidus du jeu, et « non » pour tout résidu imprévu.
+    """
+
+    OUTCOMES = {
+        "artist from vinci": JUDGE_YES,
+        "brisbane": JUDGE_NO,
+        # Rang neutralisé sur question numérique : l'arbitre rend un verdict
+        # illisible, comme un juge tronqué.
+        "3": JUDGE_FAILED,
+    }
+
+    def verdict(self, question: str, expected: str, given: str) -> str:
+        return self.OUTCOMES.get(normalize(given), JUDGE_NO)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -235,9 +264,9 @@ def main(argv: list[str] | None = None) -> int:
     clear_silver()
     build_questions()
     build_answers()
-    # Jugements produits par le vrai code, sans juge LLM : le résidu tombe donc
-    # en no_match plutôt que d'appeler le modèle, ce qui garde le jeu déterministe.
-    written = run_judge()
+    # Jugements produits par le vrai code, avec un arbitre scripté à la place du
+    # modèle : le jeu reste déterministe et n'exige pas LM Studio.
+    written = run_judge(llm_judge=ScriptedJudge())
     print(f"[fixture] judgments -> {len(written)} partitions")
     return 0
 

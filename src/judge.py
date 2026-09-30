@@ -70,11 +70,27 @@ _JUDGE_SYSTEM = (
 )
 
 
+# Issues possibles d'un appel au juge. « failed » regroupe tout ce qui n'est
+# pas un verdict lisible : appel en échec, réponse tronquée, vide ou hors
+# lexique. Le distinguer d'un « no » sincère est la raison d'être de ce
+# vocabulaire — confondus, les deux disparaissaient ensemble dans no_match.
+JUDGE_YES = "yes"
+JUDGE_NO = "no"
+JUDGE_FAILED = "failed"
+
+# Étage de la cascade écrit pour chaque issue du juge.
+_JUDGE_METHODS = {
+    JUDGE_YES: "llm_judge",
+    JUDGE_NO: "llm_judge_rejected",
+    JUDGE_FAILED: "llm_judge_failed",
+}
+
+
 class LLMJudge:
     def __init__(self, client: Any = None) -> None:
         self.client = client or LLMClient(config.JUDGE_MODEL_NAME)
 
-    def is_equivalent(self, question: str, expected: str, given: str) -> bool:
+    def verdict(self, question: str, expected: str, given: str) -> str:
         prompt = (
             f"Question: {question}\n"
             f"Reference answer: {expected}\n"
@@ -82,9 +98,15 @@ class LLMJudge:
             "Does the candidate answer mean the same as the reference answer? YES or NO."
         )
         result = self.client.complete(_JUDGE_SYSTEM, prompt)
-        if result.status != "ok":
-            return False
-        return normalize(result.text).split(" ")[0] == "yes"
+        if result.status != "ok" or result.finish_reason == "maxPredictedTokensReached":
+            return JUDGE_FAILED
+        first_word = normalize(result.text).split(" ")[0]
+        if first_word in (JUDGE_YES, JUDGE_NO):
+            return first_word
+        return JUDGE_FAILED
+
+    def is_equivalent(self, question: str, expected: str, given: str) -> bool:
+        return self.verdict(question, expected, given) == JUDGE_YES
 
 
 def _verdict(method: str, correct: bool, answer_norm: str, score: float) -> dict[str, Any]:
@@ -157,11 +179,13 @@ def judge_one(
         return _verdict("fuzzy", True, answer_norm, score)
 
     if llm_judge is not None:
-        equivalent = llm_judge.is_equivalent(
+        outcome = llm_judge.verdict(
             str(question_row["question"]), str(question_row["correct_answer"]), given
         )
-        if equivalent:
-            return _verdict("llm_judge", True, answer_norm, score)
+        # Un non et un échec du juge sont faux tous les deux, mais tracés à
+        # part : sans quoi ils se confondent avec les résidus jamais soumis.
+        method = _JUDGE_METHODS.get(outcome, _JUDGE_METHODS[JUDGE_FAILED])
+        return _verdict(method, outcome == JUDGE_YES, answer_norm, score)
 
     return _verdict("no_match", False, answer_norm, score)
 
@@ -207,6 +231,12 @@ def run_judge(model_slug: str | None = None, llm_judge: Any = None) -> list[Path
         path = target / f"judgments-{config.JUDGMENT_VERSION}.parquet"
         frame = pd.DataFrame(records, columns=JUDGMENT_COLUMNS).astype(JUDGMENT_DTYPES)
         atomic_write_dataframe(frame, path, "parquet")
+        # dbt lit tous les parquets de la partition : un verdict d'une version
+        # antérieure de la cascade doublerait chaque ligne. Le jugement étant
+        # rejouable, la version courante remplace les précédentes.
+        for stale in target.glob("judgments-*.parquet"):
+            if stale != path:
+                stale.unlink()
         written.append(path)
 
     print(f"[judge] {len(written)} partitions écrites sous {config.SILVER_JUDGMENTS_DIR}")

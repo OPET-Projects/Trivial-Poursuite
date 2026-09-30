@@ -31,22 +31,27 @@ def answer(text, status="ok"):
     return {"question_id": "q1", "ai_answer": text, "status": status}
 
 
-class AlwaysYesJudge:
+class FixedJudge:
+    reply = None
+
     def __init__(self):
         self.calls = 0
 
-    def is_equivalent(self, question, expected, given):
+    def verdict(self, question, expected, given):
         self.calls += 1
-        return True
+        return self.reply
 
 
-class AlwaysNoJudge:
-    def __init__(self):
-        self.calls = 0
+class AlwaysYesJudge(FixedJudge):
+    reply = "yes"
 
-    def is_equivalent(self, question, expected, given):
-        self.calls += 1
-        return False
+
+class AlwaysNoJudge(FixedJudge):
+    reply = "no"
+
+
+class FailingJudge(FixedJudge):
+    reply = "failed"
 
 
 def test_error_status_is_excluded():
@@ -116,8 +121,23 @@ def test_llm_judge_is_the_last_resort():
     assert judge.calls == 1
 
 
-def test_no_match_when_judge_declines():
+def test_judge_rejection_is_traced_apart_from_no_match():
+    """Un non du juge était auparavant noyé dans no_match, donc invisible."""
     verdict = judge_one(answer("Pablo Picasso"), question(), llm_judge=AlwaysNoJudge())
+    assert verdict["match_method"] == "llm_judge_rejected"
+    assert verdict["ai_correct"] is False
+    assert verdict["ai_correct_strict"] is False
+
+
+def test_judge_failure_is_traced_apart_from_rejection():
+    verdict = judge_one(answer("Pablo Picasso"), question(), llm_judge=FailingJudge())
+    assert verdict["match_method"] == "llm_judge_failed"
+    assert verdict["ai_correct"] is False
+    assert verdict["ai_correct_strict"] is False
+
+
+def test_residue_is_no_match_without_judge():
+    verdict = judge_one(answer("Pablo Picasso"), question(), llm_judge=None)
     assert verdict["match_method"] == "no_match"
     assert verdict["ai_correct"] is False
 
@@ -129,19 +149,39 @@ def test_permissive_never_below_strict():
             assert verdict["ai_correct"]
 
 
+class StubClient:
+    def __init__(self, reply, finish_reason="eosFound", status="ok"):
+        self.reply = reply
+        self.finish_reason = finish_reason
+        self.status = status
+
+    def complete(self, system_prompt, user_prompt):
+        from src.llm_client import LLMResult
+
+        return LLMResult(
+            self.reply, self.reply, 0.1, None, None, self.finish_reason, self.status, "", 1
+        )
+
+
 def test_llm_judge_parses_yes_and_no():
-    class Stub:
-        def __init__(self, reply):
-            self.reply = reply
+    assert LLMJudge(StubClient("YES")).verdict("q", "a", "b") == "yes"
+    assert LLMJudge(StubClient("no.")).verdict("q", "a", "b") == "no"
+    assert LLMJudge(StubClient("YES")).is_equivalent("q", "a", "b") is True
+    assert LLMJudge(StubClient("no")).is_equivalent("q", "a", "b") is False
 
-        def complete(self, system_prompt, user_prompt):
-            from src.llm_client import LLMResult
 
-            return LLMResult(self.reply, self.reply, 0.1, None, None, "stop", "ok", "", 1)
-
-    assert LLMJudge(Stub("YES")).is_equivalent("q", "a", "b") is True
-    assert LLMJudge(Stub("no")).is_equivalent("q", "a", "b") is False
-    assert LLMJudge(Stub("perhaps")).is_equivalent("q", "a", "b") is False
+@pytest.mark.parametrize(
+    "client",
+    [
+        StubClient("perhaps"),
+        StubClient(""),
+        StubClient("YES", finish_reason="maxPredictedTokensReached"),
+        StubClient("", status="error"),
+    ],
+    ids=["hors-lexique", "vide", "tronque", "erreur"],
+)
+def test_llm_judge_unreadable_reply_is_a_failure_not_a_no(client):
+    assert LLMJudge(client).verdict("q", "a", "b") == "failed"
 
 
 def test_rank_reference_is_disabled_for_numeric_answers():
@@ -267,6 +307,25 @@ def test_run_judge_is_replayable_without_reinference(tmp_path, monkeypatch):
     judged = read_judgments(tmp_path / "judgments")
     assert len(judged) == 1
     assert judged.loc[0, "match_method"] == "choice_letter"
+
+
+def test_run_judge_replaces_verdicts_of_an_earlier_cascade_version(tmp_path, monkeypatch):
+    """dbt lit tous les parquets d'une partition : deux versions doubleraient les lignes."""
+    _stage(tmp_path, monkeypatch, [question()])
+    _write_answers(
+        tmp_path / "answers",
+        [{"question_id": "q1", "model_slug": "m1", "prompt_variant": "p1_constrained_mcq",
+          "ai_answer": "B", "status": "ok"}],
+    )
+    partition = tmp_path / "judgments" / "model=m1" / "prompt_variant=p1_constrained_mcq"
+    partition.mkdir(parents=True)
+    stale = partition / "judgments-cascade_v0.parquet"
+    stale.write_bytes(b"")
+
+    written = run_judge()
+    assert not stale.exists()
+    assert sorted(partition.iterdir()) == written
+    assert len(read_judgments(tmp_path / "judgments")) == 1
 
 
 def test_run_judge_filters_on_model_slug(tmp_path, monkeypatch):

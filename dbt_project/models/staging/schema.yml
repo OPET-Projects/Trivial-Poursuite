@@ -46,4 +46,5 @@ models:
               arguments:
                 values:
                   ["boolean", "exact", "choice_letter", "choice_match", "fuzzy",
-                   "llm_judge", "no_match", "error"]
+                   "llm_judge", "llm_judge_rejected", "llm_judge_failed",
+                   "no_match", "error"]
