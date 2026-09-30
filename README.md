@@ -13,6 +13,31 @@ exploser d'un facteur 19.
 
 ---
 
+## Démarrage rapide
+
+Le dépôt contient les données complètes du benchmark publié : bronze, silver
+et la base gold `data/gold/benchmark.duckdb`. Le dashboard se lance donc sans
+LM Studio, sans inférence et sans dbt :
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app/streamlit_app.py
+```
+
+> [!WARNING]
+> **Les données sont versionnées uniquement pour la correction.** Elles ont été
+> poussées pour que le rapport soit consultable dès le clone, sans les 9 heures
+> d'inférence qu'il a coûté. Ce n'est pas la pratique du projet : les données
+> sont des artefacts produits par le pipeline, et n'ont normalement pas leur
+> place dans un dépôt de code.
+>
+> Relancer un étage du pipeline réécrit ces fichiers. Pour revenir aux données
+> publiées : `git restore data/ && git clean -fd data/`.
+
+---
+
 ## Architecture médaillon
 
 | Couche | Emplacement | Contenu |
@@ -26,6 +51,22 @@ exploser d'un facteur 19.
 | Gold | `data/gold/benchmark.duckdb` | Neuf marts métier construits par dbt |
 | Restitution | `app/streamlit_app.py` | Rapport interactif, sept pages |
 
+### Colonnes d'enrichissement
+
+Les trois colonnes imposées par le sujet, et la trace du prompt :
+
+| Colonne | Contenu | Couche |
+| --- | --- | --- |
+| `ai_answer` | Réponse du modèle, nettoyée (`raw_answer` garde la sortie brute) | silver `answers/` |
+| `ai_correct` | Booléen, `True` si la réponse correspond à la bonne ; `ai_correct_strict` en est la version sans tolérance | silver `judgments/` |
+| `response_time` | Temps de génération en secondes, chronométré autour du seul appel | silver `answers/` |
+| `prompt_variant`, `prompt_hash`, `prompt_text` | Variante, empreinte du gabarit et texte exact envoyé au modèle | silver `answers/` |
+
+Les trois colonnes imposées sont réunies ligne à ligne dans `int_results`, la
+table dbt dont dérivent tous les marts.
+
+### Principes
+
 Chaque étage écrit un artefact immuable et ne relit que l'étage précédent.
 Aucun étage ne modifie ce qu'un autre a produit.
 
@@ -36,13 +77,46 @@ sans refaire un seul appel au modèle.
 
 ---
 
+## Prérequis
+
+- Python 3.10 ou plus
+- [LM Studio](https://lmstudio.ai), serveur local démarré (onglet *Developer*),
+  modèle chargé en mémoire. Le pipeline l'appelle par son API REST, pas par le
+  SDK Python : voir [l'écart assumé à la consigne](#la-seconde-vague--couper-le-raisonnement-par-lapi)
+- Environ 15 Go de mémoire libre — le plus lourd des modèles mesurés,
+  `google/gemma-4-26b-a4b-qat`, occupe 14,6 Go une fois chargé. Les modèles
+  n'ont jamais à tenir ensemble en mémoire : le pipeline les interroge l'un
+  après l'autre
+
+## Installation
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env      # puis renseigner LLM_MODEL
+```
+
+Variables reconnues (`.env`) :
+
+| Variable | Défaut | Rôle |
+| --- | --- | --- |
+| `LLM_MODEL` | `google/gemma-4-26b-a4b-qat` | Modèle interrogé, identifiant tel qu'affiché par LM Studio |
+| `JUDGE_MODEL` | valeur de `LLM_MODEL` | Modèle qui arbitre les réponses ambiguës |
+| `LMSTUDIO_BASE_URL` | `http://localhost:1234` | Adresse du serveur LM Studio |
+| `LLM_TIMEOUT_SECONDS` | `180` | Délai maximum d'un appel |
+| `LLM_REASONING_EFFORT` | `none` | Raisonnement des modèles qui en ont un. Toute autre valeur rend les runs incomparables |
+
+---
+
 ## Déroulé complet, de A à Z
 
 Ce parcours reproduit le benchmark publié, du clone du dépôt jusqu'au
 dashboard. Chaque étape dit ce qu'elle fait, pourquoi, ce qu'elle produit et
 comment vérifier qu'elle a réussi ; les sections suivantes détaillent la
-mécanique. Pour voir l'interface sans lancer d'inférence, voir
-[Voir le dashboard sans lancer d'inférence](#voir-le-dashboard-sans-lancer-dinférence).
+mécanique. Pour seulement consulter les résultats, le
+[démarrage rapide](#démarrage-rapide) suffit : les données du dépôt sont
+celles que ce parcours produit.
 
 | # | Étape | Produit | Durée mesurée |
 | --- | --- | --- | --- |
@@ -55,6 +129,10 @@ mécanique. Pour voir l'interface sans lancer d'inférence, voir
 | 6 | Juger les réponses | silver `judgments/` | 46 à 55 min par vague |
 | 7 | Construire la couche gold | `benchmark.duckdb` | — |
 | 8 | Lire les résultats | dashboard | — |
+
+Les étapes 2, 3, 5 et 6 s'enchaînent aussi en une commande,
+`python run_pipeline.py`, sur le modèle défini par `LLM_MODEL`. Options
+complètes : `python run_pipeline.py --help`.
 
 ### Étape 0 — Préparer le poste
 
@@ -213,7 +291,8 @@ JUDGE_MODEL="google/gemma-4-26b-a4b-qat" python -m src.judge --model-slug prism-
 
 Ces commandes reproduisent les arbitres des résultats publiés. Pour un seul
 arbitre sur les quatre modèles, charger ce modèle et lancer
-`python run_pipeline.py --stages judge`, qui rejuge tout.
+`python run_pipeline.py --stages judge`, qui rejuge tout ; `--no-llm-judge`
+rejoue la cascade sans l'arbitre, sans LM Studio.
 
 **Ce que ça fait.** Passe chaque réponse dans une
 [cascade à huit niveaux](#décision-de-justesse) : correspondance booléenne,
@@ -263,120 +342,17 @@ Le dashboard s'ouvre sur `http://localhost:8501` et lit la base gold. Les
 chiffres de référence et leur lecture sont dans [Résultats](#résultats) ; les
 réserves qui les bornent, dans [Limites et mesures](#limites-et-mesures).
 
----
+### Exercer la chaîne sur des données synthétiques
 
-## Prérequis
-
-- Python 3.10 ou plus
-- [LM Studio](https://lmstudio.ai), serveur local démarré (onglet *Developer*),
-  modèle chargé en mémoire. Le pipeline l'appelle par son API REST, pas par le
-  SDK Python : voir [l'écart assumé à la consigne](#la-seconde-vague--couper-le-raisonnement-par-lapi)
-- Environ 15 Go de mémoire libre — le plus lourd des modèles mesurés,
-  `google/gemma-4-26b-a4b-qat`, occupe 14,6 Go une fois chargé. Les modèles
-  n'ont jamais à tenir ensemble en mémoire : le pipeline les interroge l'un
-  après l'autre
-
-## Installation
+Un générateur de silver synthétique permet d'exercer dbt et l'interface sur un
+jeu minuscule et entièrement maîtrisé. Il remplace le silver du dépôt, d'où le
+`--force` ; la dernière commande restaure les données publiées :
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env      # puis renseigner LLM_MODEL
-```
-
-Variables reconnues (`.env`) :
-
-| Variable | Défaut | Rôle |
-| --- | --- | --- |
-| `LLM_MODEL` | `google/gemma-4-26b-a4b-qat` | Modèle interrogé, identifiant tel qu'affiché par LM Studio |
-| `JUDGE_MODEL` | valeur de `LLM_MODEL` | Modèle qui arbitre les réponses ambiguës |
-| `LMSTUDIO_BASE_URL` | `http://localhost:1234` | Adresse du serveur LM Studio |
-| `LLM_TIMEOUT_SECONDS` | `180` | Délai maximum d'un appel |
-| `LLM_REASONING_EFFORT` | `none` | Raisonnement des modèles qui en ont un. Toute autre valeur rend les runs incomparables |
-
----
-
-## Exécution
-
-### 1. Pipeline
-
-```bash
-# Tout le pipeline : ingest → transform → enrich → judge
-python run_pipeline.py
-
-# Étages séparés
-python run_pipeline.py --stages ingest transform
-python run_pipeline.py --stages enrich --model "google/gemma-4-26b-a4b-qat"
-python run_pipeline.py --stages enrich --model "prism-ml/bonsai-27b"
-python run_pipeline.py --stages judge
-
-# Smoke test rapide, une seule variante
-python run_pipeline.py --stages enrich --sample-size 20 --variants p1_constrained_mcq
-```
-
-**Répartition sur plusieurs postes.** `--shard i/n` découpe le travail de façon
-déterministe : chaque poste traite la tranche `i` sur `n`, sans recouvrement et
-sans coordination. Les parquets produits sont ensuite mutualisés à la main.
-
-```bash
-python run_pipeline.py --stages enrich --shard 0/3    # poste 1
-python run_pipeline.py --stages enrich --shard 1/3    # poste 2
-python run_pipeline.py --stages enrich --shard 2/3    # poste 3
-```
-
-**Rejouer le jugement sans réinférence.** C'est la propriété qui rend le projet
-tenable : l'étage `judge` relit les réponses déjà écrites et n'appelle jamais le
-modèle d'inférence.
-
-```bash
-python run_pipeline.py --stages judge                 # rejoue tous les modèles
-python run_pipeline.py --stages judge --no-llm-judge  # sans l'arbitre LLM
-```
-
-**Ajouter un modèle sans rejuger les autres.** L'étage `judge` du pipeline
-rejoue tous les modèles avec l'arbitre courant. Pour juger un seul modèle et
-laisser intacts les verdicts existants :
-
-```bash
-JUDGE_MODEL="google/gemma-4-26b-a4b-qat" python -m src.judge --model-slug prism-ml_bonsai-27b
-```
-
-**Reprise.** L'inférence est reprenable. Relancer la même commande après une
-interruption repart où le run s'est arrêté : la clé `(question_id, model_slug,
-prompt_variant)` identifie ce qui est déjà fait, et seules les lignes en
-`status = ok` comptent comme acquises.
-
-Options complètes : `python run_pipeline.py --help`.
-
-### 2. Couche gold
-
-```bash
-cd dbt_project
-dbt deps
-dbt build --profiles-dir .
-cd ..
-```
-
-### 3. Dashboard
-
-```bash
-streamlit run app/streamlit_app.py
-```
-
-> **Sans couche gold, le dashboard s'ouvre sur un message d'erreur** nommant la
-> commande dbt à lancer — c'est l'état d'un dépôt fraîchement cloné, et c'est
-> normal. Les étapes 1 et 2 doivent avoir été exécutées avant.
-
-### Voir le dashboard sans lancer d'inférence
-
-Un générateur de silver synthétique permet d'exercer dbt et l'interface sans les
-dizaines d'heures d'appels au modèle :
-
-```bash
-python tests/fixtures/make_fixture_silver.py
+python tests/fixtures/make_fixture_silver.py --force
 cd dbt_project && dbt build --profiles-dir . && cd ..
 streamlit run app/streamlit_app.py
+git restore data/ && git clean -fd data/
 ```
 
 Le jeu couvre délibérément les cas qui rendent les marts interprétables :
@@ -392,6 +368,8 @@ détruire un run de production par accident.
 
 > Les chiffres affichés sont alors **synthétiques**. Ils valident la chaîne
 > technique, pas les performances des modèles.
+
+---
 
 ---
 
@@ -539,130 +517,56 @@ clair. Ce n'est pas de la coquetterie : voir ci-dessous.
 
 ## Choix des modèles et exclusion du raisonnement
 
-Le premier modèle d'inférence mesuré est **`google/gemma-3-12b`**. Il a remplacé
-`google/gemma-4-12b-qat`, retenu à la conception, et cette substitution est la
-décision qui conditionne la faisabilité du benchmark. Elle mérite d'être
-justifiée.
+Quatre modèles, tous interrogés **sans raisonnement** : c'est la condition qui
+rend le benchmark tenable en temps et comparable d'un modèle à l'autre.
 
-### Le problème
-
-`gemma-4-12b-qat` est un **modèle à raisonnement** : il émet sa réflexion avant
-sa réponse, séparée par un marqueur interne au SDK LM Studio. Ce comportement
-n'était pas anticipé par la conception, et il a produit trois défauts distincts
-qui ont tous la même cause.
-
-1. **Le coût.** Environ **214 jetons de complétion médians pour une réponse
-   utile d'un seul caractère**. Le poste de dépense est la réflexion, pas le
-   prompt.
-2. **La perte de données.** **Quatre réponses sur dix en `p1`** sortaient vides,
-   avec `status = ok` et `finish_reason = maxPredictedTokensReached` : le modèle
-   épuisait son plafond de jetons en réflexion et était tronqué avant d'émettre
-   sa réponse. Une telle ligne n'est pas une erreur du modèle sur le fond, mais
-   elle entre au dénominateur comme une réponse fausse.
-3. **L'arbitre.** Le juge LLM subissait la même troncature. Tronqué, il ne rend
-   rien, et son verdict tombe à `False` — indistinguable d'un vrai NON.
-
-### Pourquoi ne pas simplement désactiver le raisonnement
-
-Parce que ce n'est pas possible pour ce modèle. Cinq leviers ont été testés sur
-l'instance LM Studio du projet, aucun ne supprime la génération :
-
-| Levier | Résultat |
-| --- | --- |
-| Baseline | 84 jetons, raisonne |
-| Suffixe `/no_think` | 84 jetons, raisonne |
-| Consigne système « do not reason » | **131 jetons**, raisonne |
-| Sortie structurée (schéma JSON) | 94 jetons, raisonne |
-| SDK `reasoning_parsing: enabled=false` | 84 jetons, raisonne |
-
-Le détail contre-intuitif mérite d'être noté : **demander explicitement au
-modèle de ne pas raisonner lui fait consommer 56 % de jetons en plus**. Il
-raisonne sur la consigne.
-
-Les réglages de raisonnement de LM Studio (`autoExpandReasoningBlocks`,
-`reasoningBlocksVignette`, `separateReasoningContentInAPI`) ne contrôlent que
-l'**affichage** et la **délimitation**, jamais l'émission. Le raisonnement est
-une propriété du modèle, pas du runtime : `gemma-4-12b-qat` n'a pas de mode
-hybride commutable.
-
-### La décision
-
-Basculer sur `gemma-3-12b` : **même famille, même taille (12B)**, donc la
-comparaison avec le second modèle reste interprétable, mais sans raisonnement.
-
-Mesures sur les trois variantes, 24 appels, chauffe exclue :
-
-| | `gemma-4-12b-qat` | `gemma-3-12b` |
+| Modèle | Architecture | Vague |
 | --- | --- | --- |
-| Temps médian par appel | 14,5 s | **0,77 s** |
-| Jetons de complétion médians | 214 | **2** |
-| Réponses vides en `p1` | 4 sur 10 | **0 sur 24** |
-| Appels avec raisonnement | tous | **0 sur 24** |
-| Arbitre : verdicts conformes | 3 sur 4, en 7,4–23,5 s | **4 sur 4, en 0,84 s** |
-| **Matrice complète, cumulée** | **~128 h** | **~6,8 h** |
+| `google/gemma-3-12b` | dense 12B | 1 |
+| `liquid/lfm2-24b-a2b` | mélange d'experts 24B, ~2B actifs | 1 |
+| `google/gemma-4-26b-a4b-qat` | mélange d'experts 26B, ~4B actifs, quantisé 4 bits | 2 |
+| `prism-ml/bonsai-27b` | dense 27B, architecture Qwen 3.5 | 2 |
 
-Un facteur **19** sur le budget, et les trois défauts disparaissent ensemble.
-L'estimation de 8 à 12 h de la conception redevient tenable.
+### Pourquoi écarter le raisonnement
 
-### Le second modèle
+Le modèle retenu à la conception, `gemma-4-12b-qat`, **raisonne avant de
+répondre** et n'a pas de mode qui le désactive. Sondé sur quelques dizaines
+d'appels, il consommait environ 214 jetons médians pour une réponse d'un seul
+caractère, sortait 4 réponses vides sur 10 en `p1` (plafond de jetons épuisé en
+réflexion) et tronquait l'arbitre de la même façon. Cinq leviers ont été
+essayés — suffixe `/no_think`, consigne système, sortie structurée, réglage du
+SDK — sans effet ; demander au modèle de ne pas raisonner lui faisait même
+consommer 56 % de jetons en plus.
 
-`prism-ml/bonsai-27b`, retenu à la conception, **n'était pas téléchargé** lors
-de la première vague. Il y est remplacé par **`liquid/lfm2-24b-a2b`**, un
-mélange d'experts 24B à environ 2 milliards de paramètres actifs, puis
-réintégré dans la [seconde vague](#la-seconde-vague--couper-le-raisonnement-par-lapi).
-
-Sondé selon le même protocole, 24 appels sur les trois variantes, chauffe
-exclue :
-
-| | `gemma-3-12b` | `lfm2-24b-a2b` |
-| --- | --- | --- |
-| Temps médian par appel | 0,77 s | **0,43 s** |
-| Jetons de complétion médians | 2 | **2** |
-| Réponses vides | 0 sur 24 | **0 sur 23** |
-| Appels avec raisonnement | 0 sur 24 | **0 sur 23** |
-| Appels tronqués | 0 sur 24 | **0 sur 23** |
-| Arbitre : verdicts conformes | 4 sur 4, en 0,84 s | **4 sur 4, en 0,38–0,41 s** |
-
-Les trois défauts qui ont fait écarter `gemma-4-12b-qat` sont absents. Le
-modèle entre dans la matrice sans réserve, et le budget complet — les deux
-modèles, les trois variantes — s'est établi à **3 h 43**, 2 h 05 pour
-`gemma-3-12b` et 1 h 38 pour `lfm2-24b-a2b`.
-
-Le contraste entre les deux est volontairement architectural — dense 12B contre
-mélange d'experts 24B-A2B — et non une variation de taille dans une même
-famille. Les modèles ne sont jamais chargés ensemble : le pipeline les interroge
-l'un après l'autre, ce que l'exécution séquentielle impose de toute façon.
+Il a donc été remplacé par `gemma-3-12b`, de même famille et de même taille
+mais sans raisonnement : 0,77 s et 2 jetons médians par appel, aucune réponse
+vide, et un budget projeté de **~6,8 h au lieu de ~128 h**, soit un facteur 19.
+`prism-ml/bonsai-27b`, l'autre modèle prévu, n'était pas téléchargé lors de la
+première vague : `lfm2-24b-a2b` a pris sa place, avant son retour en seconde
+vague.
 
 ### La seconde vague : couper le raisonnement par l'API
 
-Deux modèles ont été ajoutés ensuite, sur le même corpus et les mêmes variantes :
-
-- **`google/gemma-4-26b-a4b-qat`**, mélange d'experts 26B à environ 4 milliards
-  de paramètres actifs, entraîné pour la quantisation 4 bits ;
-- **`prism-ml/bonsai-27b`**, 27B d'architecture Qwen 3.5, 8,5 Go sur disque.
-
-**Les deux raisonnent par défaut**, et le client de la première vague rendait
-`gemma-4-26b-a4b` inexploitable. Sondé via le SDK `lmstudio`, il émettait 42 à
-209 jetons de complétion par appel, et sa réflexion arrive balisée
-`<|channel>thought … <channel|>`, un format que `strip_reasoning` ne reconnaît
-pas : la réponse nettoyée valait `<|channel>thought` sur **6 appels sur 6**,
-avec `status = ok`. Un run lancé tel quel aurait été noté à 0 % sans une seule
-erreur visible.
-
-À la différence de `gemma-4-12b-qat`, ces modèles ont un **mode sans
-raisonnement commutable**. Le SDK ne l'expose pas ; l'API compatible OpenAI du
-serveur LM Studio l'accepte via `reasoning_effort`. Sur une même question, jetons
-de complétion dont raisonnement :
+`gemma-4-26b-a4b-qat` et `bonsai-27b` raisonnent aussi par défaut, mais ont un
+**mode sans raisonnement commutable**. Le SDK Python de LM Studio ne l'expose
+pas ; l'API compatible OpenAI du même serveur l'accepte via
+`reasoning_effort`. Sur une même question, jetons de complétion dont
+raisonnement :
 
 | Appel | `gemma-4-26b-a4b-qat` | `bonsai-27b` | Réponse |
 | --- | --- | --- | --- |
 | Sans paramètre | 87 dont 80 | 143 dont 137 | Tungsten |
 | `reasoning_effort: "none"` | **4 dont 0** | **4 dont 0** | Tungsten |
 
-`src/llm_client.py` interroge donc désormais `/v1/chat/completions` avec
-`reasoning_effort = none`. Ce choix remet les nouveaux modèles **sous le
-protocole de la première vague** — réponse directe, sans réflexion —, ce qui
-rend les quatre modèles comparables.
+Sans ce réglage, `gemma-4-26b-a4b` était inexploitable : sa réflexion arrive
+sous une balise que le nettoyage ne reconnaissait pas, et la réponse retenue
+valait `<|channel>thought` sur 6 appels sur 6, avec `status = ok`. Le modèle
+aurait été noté à 0 % sans une seule erreur visible.
+
+`src/llm_client.py` interroge donc `/v1/chat/completions` avec
+`reasoning_effort = none`, ce qui remet la seconde vague sous le protocole de
+la première : réponse directe, sans réflexion. `runtime_version` trace le canal
+d'appel sur chaque ligne.
 
 > **Écart assumé à la consigne.** Le sujet demande d'utiliser l'API Python de
 > l'outil. La première vague l'a fait : ses 31 770 inférences portent
@@ -674,32 +578,10 @@ rend les quatre modèles comparables.
 > les modèles et l'exécution locale restent ceux qu'impose le sujet ; seul le
 > canal d'appel change, et il est tracé sur chaque ligne.
 
-Deux conséquences sont tracées :
-
-- `runtime_version` porte le protocole à chaque ligne
-  (`lmstudio-openai-api/reasoning_effort=none`) : deux runs au raisonnement
-  différent ne peuvent pas se confondre ;
-- `finish_reason` est traduit dans le vocabulaire du SDK (`length` devient
-  `maxPredictedTokensReached`), sur lequel `int_results` détecte la troncature.
-  Les runs antérieurs restent lisibles sans migration.
-
-Sondés sous ce protocole, 6 appels chacun sur les trois variantes : 6 réponses
-exactes sur 6 pour les deux modèles, 2 à 4 jetons de complétion. L'inférence
-complète a pris **5 h 10**, 1 h 37 pour `gemma-4-26b-a4b` et 3 h 33 pour
-`bonsai-27b`.
-
-**Arbitre.** `gemma-3-12b` n'étant plus disponible, les deux nouveaux modèles
-sont arbitrés par `gemma-4-26b-a4b`, jugés modèle par modèle
-(`--model-slug`) pour ne pas réécrire les verdicts de la première vague. Voir
-la [limite 3](#limites-et-mesures).
-
-### Ce qui reste dans le code
-
-`strip_reasoning` et le plafond `LLM_MAX_TOKENS = 256` sont **conservés**. Avec
-l'API, la réflexion éventuelle arrive dans un champ séparé et n'est jamais
-notée ; ces deux gardes restent la protection contre un modèle qui raisonnerait
-malgré `reasoning_effort = none`. Tout modèle ajouté doit être sondé avant son
-run de production, comme les quatre modèles mesurés l'ont été.
+Le nettoyage du raisonnement et le plafond `LLM_MAX_TOKENS = 256` restent en
+place, en garde contre un modèle qui raisonnerait malgré le réglage. Tout
+nouveau modèle doit être sondé avant son run complet
+([étape 4](#étape-4--sonder-chaque-modèle)).
 
 ---
 
@@ -744,6 +626,29 @@ deux familles Gemma dominent la matrice.
 En `p1`, `gemma-4-26b-a4b` est le seul modèle à sortir du format lettré : sur
 trois questions, il refuse de choisir (« None of the options provided are
 correct… »). Ces réponses tombent en `no_match` et comptent fausses.
+
+### Difficulté et catégorie
+
+Accuracy permissive, toutes variantes confondues :
+
+| Modèle | facile | moyen | difficile |
+| --- | --- | --- | --- |
+| `gemma-4-26b-a4b-qat` | 80,7 % | 67,8 % | 59,3 % |
+| `gemma-3-12b` | 75,1 % | 64,0 % | 56,2 % |
+| `bonsai-27b` | 64,1 % | 49,4 % | 42,6 % |
+| `lfm2-24b-a2b` | 61,1 % | 50,6 % | 43,8 % |
+
+La difficulté annoncée par OpenTDB prédit bien l'échec : chaque modèle perd de
+17 à 22 points entre facile et difficile. Les deux Gemma restent en tête à
+chaque niveau ; `bonsai-27b` et `lfm2-24b-a2b` s'échangent la troisième place.
+
+Par catégorie, l'écart est plus large encore. Les thèmes scolaires dominent —
+Mythology 84,4 %, Science & Nature 83,1 %, Mathematics 82,0 % —, la culture
+populaire ferme la marche : Cartoon & Animations 45,7 %, Video Games 40,5 %.
+Video Games est aussi la plus grosse catégorie du corpus (1 184 questions sur
+5 295) : elle pèse lourd dans le score global. 391 questions ne sont réussies
+par aucun modèle sous aucune variante. Le détail par modèle et par catégorie
+est dans les pages *Catégories* et *Difficulté* du dashboard.
 
 ### L'ingénierie de prompt n'a rien apporté
 
@@ -792,10 +697,23 @@ Deux niveaux de la cascade se lisent de travers si on ignore leur construction :
   une réponse qui désigne la *bonne* option est captée par `exact` au niveau 3.
   Ce niveau ne peut donc, par construction, capter que des réponses désignant
   une mauvaise option.
-- **`llm_judge` affiche 100 % en permissif et 0 % en strict.** C'est la limite
-  documentée ci-dessous, vérifiée sur données réelles : sous la cascade
-  `cascade_v1` qui a produit ces chiffres, seuls les verdicts positifs s'y
-  inscrivaient.
+- **`llm_judge` affiche 100 % en permissif et 0 % en strict** : sous
+  `cascade_v1`, qui a produit ces chiffres, seuls les verdicts positifs de
+  l'arbitre étaient inscrits. Voir la [limite 1](#limites-et-mesures).
+
+### Robustesse face aux ambiguïtés
+
+Le sujet invite à observer la robustesse des prompts face aux ambiguïtés. Trois
+mesures du benchmark y répondent :
+
+- **L'écart strict/permissif en mode ouvert**, de 7,5 à 13,4 points selon le
+  modèle et la variante, mesure la part des bonnes réponses formulées autrement que la
+  référence : variante de nom, article, pluriel. Le mode contraint `p1` l'annule
+  en fermant la réponse sur une lettre.
+- **La part de `no_match`**, de 25 à 42 % en mode ouvert, mesure ce qu'aucune
+  comparaison ne sait rattacher à la référence.
+- **Les refus de choisir** : en `p1`, `gemma-4-26b-a4b` juge trois fois
+  qu'aucune option n'est correcte au lieu de répondre par une lettre.
 
 ### Latence
 
@@ -813,8 +731,10 @@ les plus rapides, et cela se lit directement dans le débit. `gemma-4-26b-a4b`
 cumule le meilleur score et la deuxième latence la plus basse. `bonsai-27b` est
 le plus lent sur les trois variantes.
 
-Les deux vagues sont enregistrées sous deux valeurs de `host` distinctes :
-`mart_latency` et le dashboard les présentent donc dans des groupes séparés.
+Les quatre modèles ont tourné sur le même matériel, un Apple M5 : leurs temps
+sont comparables. Les deux vagues portent pourtant deux valeurs de `host`
+distinctes, le nom réseau de la machine ayant changé entre elles ;
+`mart_latency` et le dashboard les présentent donc dans deux groupes.
 
 > Ces chiffres sont ceux de **deux** vagues, sur **un** corpus, avec **quatre**
 > modèles locaux quantisés. Ils ne disent rien des mêmes modèles en pleine
@@ -829,35 +749,18 @@ Les deux vagues sont enregistrées sous deux valeurs de `host` distinctes :
 > développement. Ils ne doivent pas être confondus avec les résultats des runs
 > complets, rapportés à la section précédente.
 
-**1. Les verdicts négatifs de l'arbitre LLM : corrigé dans le code, pas encore rejoué.**
+**1. Les refus de l'arbitre LLM ne sont pas visibles dans les chiffres publiés.**
 
-Sous `cascade_v1`, qui a produit les chiffres publiés, la cascade n'écrivait
-`match_method = llm_judge` que sur un verdict **positif** ; un non, sincère ou
-dû à une troncature, retombait en `no_match` avec tous les résidus. La première
-vague le montre : `mart_matching_impact` donne 100 % d'accuracy permissive et
-0 % de stricte sur les 1 187 lignes `llm_judge`, alors que l'arbitre a été
-appelé 8 329 fois. Les 7 142 appels restants sont indiscernables des autres
-résidus dans `no_match`. La seconde vague présente la même signature sur ses
-760 lignes `llm_judge`.
+Sous `cascade_v1`, qui a produit ces chiffres, un non de l'arbitre retombait
+en `no_match` avec les résidus jamais soumis : en première vague, 7 142 appels
+sur 8 329 sont ainsi indiscernables. L'effet possible est une sous-estimation
+de l'accuracy permissive, sans trace.
 
-`cascade_v2` trace chaque appel à l'arbitre sous l'une de trois valeurs :
-
-| `match_method` | Issue | `ai_correct` |
-| --- | --- | --- |
-| `llm_judge` | `YES` | vrai |
-| `llm_judge_rejected` | `NO` | faux |
-| `llm_judge_failed` | appel en échec, réponse tronquée, vide ou hors lexique | faux |
-
-La part de `llm_judge_failed` borne ce que le juge a pu coûter à l'accuracy
-permissive sans le vouloir ; le dashboard l'affiche en avertissement. Une
-réponse tronquée est classée `llm_judge_failed` même si elle commence par
-`YES` : un verdict interrompu n'est pas un verdict.
-
-**Les chiffres publiés ne bénéficient pas encore de la correction.** Il faut
-rejouer l'étage judge (voir [Étape 6](#étape-6--juger-les-réponses)), puis
-`dbt build`. Aucune inférence n'est à refaire. Le rejeu remplace le fichier
-`judgments-cascade_v1.parquet` de chaque partition par sa version v2 : dbt lit
-tous les parquets d'une partition, et deux versions y doubleraient les lignes.
+Le code est corrigé : `cascade_v2` trace chaque appel en `llm_judge` (accepté),
+`llm_judge_rejected` (refusé) ou `llm_judge_failed` (verdict illisible : échec,
+troncature, réponse hors `YES`/`NO`), et le dashboard signale ce dernier cas.
+Pour en bénéficier, il faut rejouer l'[étape 6](#étape-6--juger-les-réponses)
+puis `dbt build`, sans aucune inférence à refaire.
 
 **2. Les réponses vides restent comptées comme fausses.**
 
@@ -906,17 +809,15 @@ Le travail a suivi trois principes :
 - **Intégrer par pull request.** Les évolutions arrivent sur `main` par PR
   relue, et la suite de tests doit passer avant fusion.
 
-L'inférence, trop longue pour un seul poste, a été répartie entre les machines
-de l'équipe, modèle par modèle ; les parquets produits ont ensuite été
-rassemblés à la main. La colonne `host` trace le poste de chaque réponse, ce
-qui explique pourquoi les latences sont comparées par poste.
+Les runs publiés ont tous été produits sur une même machine, en deux vagues ;
+la colonne `host` trace le poste de chaque réponse.
 
 ### Arborescence
 
 | Chemin | Rôle |
 | --- | --- |
 | `config.py` | Chemins et paramètres, modèle lu depuis l'environnement |
-| `run_pipeline.py` | Orchestration par étages, sharding |
+| `run_pipeline.py` | Orchestration par étages |
 | `src/opentdb_client.py` | Transport HTTP : rythme, retries, codes de réponse |
 | `src/ingest_opentdb.py` | Collecte par catégorie vers la couche bronze |
 | `src/transform_silver.py` | Nettoyage, mélange seedé des options |
@@ -944,5 +845,7 @@ La suite pytest ne touche ni le réseau ni LM Studio : le backend est doublé, e
 la traduction des réponses de l'API est testée sur des charges construites. Elle
 est donc exécutable sans serveur ni modèle installé.
 
-Les tests dbt exigent une couche silver — utiliser le générateur de fixtures
-ci-dessus si aucun run n'a été mené.
+Les tests dbt s'exécutent sur la couche silver du dépôt. `dbt build` réécrit
+alors `data/gold/benchmark.duckdb` : les tables sont les mêmes, mais le fichier
+binaire change et apparaît modifié dans git. `git restore data/gold/` le ramène
+à la version publiée.
