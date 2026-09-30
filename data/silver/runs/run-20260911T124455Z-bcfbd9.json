@@ -1,0 +1,22 @@
+{
+  "run_id": "20260911T124455Z-bcfbd9",
+  "model_name": "google/gemma-3-12b",
+  "model_slug": "google_gemma-3-12b",
+  "variants": [
+    "p1_constrained_mcq",
+    "p2_open_minimal",
+    "p3_open_guided"
+  ],
+  "shard": null,
+  "sample_size": 0,
+  "counters": {
+    "ok": 15735,
+    "error": 0
+  },
+  "finished_at": "2026-09-11T14:48:44.548951+00:00",
+  "host": "MacBook-Pro-de-Paul.local",
+  "hardware": "Apple M5",
+  "os_version": "Darwin 25.6.0",
+  "python_version": "3.14.7",
+  "runtime_version": "lmstudio-python/1.5.0"
+}

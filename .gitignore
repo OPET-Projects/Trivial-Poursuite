@@ -10,12 +10,6 @@ __pycache__/
 .idea/
 .vscode/
 
-# Données générées (bronze / silver)
-data/bronze/*
-data/silver/*
-!data/bronze/.gitkeep
-!data/silver/.gitkeep
-
 # Couche gold et artefacts dbt
 data/gold/*
 !data/gold/.gitkeep
