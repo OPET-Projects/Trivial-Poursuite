@@ -81,7 +81,7 @@ quelques secondes les primitives de comparaison, la cascade de jugement, le
 mélange des options et la reprise. Une régression détectée ici coûte une
 minute ; détectée après l'inférence, elle coûte une journée.
 
-**Attendu :** 205 tests passés.
+**Attendu :** 212 tests passés.
 
 ### Étape 2 — Collecter le corpus
 
@@ -381,8 +381,10 @@ streamlit run app/streamlit_app.py
 Le jeu couvre délibérément les cas qui rendent les marts interprétables :
 quatre catégories, trois difficultés, les quatre positions de bonne réponse,
 deux modèles, trois variantes, un appel de chauffe, une réponse tronquée, une
-panne de transport, le piège du rang numérique et une réponse lettrée en mode
-ouvert. Les jugements sont produits par le **vrai** `run_judge`, pas imités.
+panne de transport, le piège du rang numérique, une réponse lettrée en mode
+ouvert et les trois issues de l'arbitre LLM. Les jugements sont produits par le
+**vrai** `run_judge`, pas imités ; seul l'arbitre est scripté, pour que le jeu
+reste déterministe sans LM Studio.
 
 Le script refuse d'écraser un silver existant sans `--force` : il ne peut pas
 détruire un run de production par accident.
@@ -468,8 +470,8 @@ conclut l'emporte, et la méthode retenue est stockée dans `match_method` :
 | 4 | `choice_letter` | La réponse désigne une option par sa lettre ou son rang |
 | 5 | `choice_match` | La réponse correspond à une **et une seule** option proposée |
 | 6 | `fuzzy` | `token_set_ratio` ≥ 90 |
-| 7 | `llm_judge` | Résidu seulement : équivalence sémantique arbitrée par le modèle local, réponse contrainte à `YES` / `NO` |
-| 8 | `no_match` | Aucun niveau n'a conclu |
+| 7 | `llm_judge`, `llm_judge_rejected`, `llm_judge_failed` | Résidu seulement : équivalence sémantique arbitrée par le modèle local, réponse contrainte à `YES` / `NO`. Chaque appel est tracé : accepté, refusé, ou sans verdict lisible (échec, troncature, réponse hors lexique) |
+| 8 | `no_match` | Aucun niveau n'a conclu, arbitre non appelé (réponse vide ou jugement lancé avec `--no-llm-judge`) |
 
 **Normalisation** : minuscules, dépliage des accents, suppression de la
 ponctuation, compression des espaces, retrait des articles initiaux anglais.
@@ -778,8 +780,9 @@ Deux niveaux de la cascade se lisent de travers si on ignore leur construction :
   Ce niveau ne peut donc, par construction, capter que des réponses désignant
   une mauvaise option.
 - **`llm_judge` affiche 100 % en permissif et 0 % en strict.** C'est la limite
-  documentée ci-dessous, désormais vérifiée sur données réelles : seuls les
-  verdicts positifs s'y inscrivent.
+  documentée ci-dessous, vérifiée sur données réelles : sous la cascade
+  `cascade_v1` qui a produit ces chiffres, seuls les verdicts positifs s'y
+  inscrivaient.
 
 ### Latence
 
@@ -813,26 +816,35 @@ Les deux vagues sont enregistrées sous deux valeurs de `host` distinctes :
 > développement. Ils ne doivent pas être confondus avec les résultats des runs
 > complets, rapportés à la section précédente.
 
-**1. Les verdicts négatifs de l'arbitre LLM ne sont pas observables.**
+**1. Les verdicts négatifs de l'arbitre LLM : corrigé dans le code, pas encore rejoué.**
 
-La cascade n'écrit `match_method = llm_judge` que sur un verdict **positif** ;
-un non, sincère ou dû à une troncature, retombe en `no_match` avec tous les
-résidus. Les lignes que
-`mart_matching_impact` montre sous `llm_judge` sont donc celles que le juge a
-acceptées, pas celles où il a pu se tromper. L'effet net est une
-**sous-estimation de l'accuracy permissive, sans trace**.
+Sous `cascade_v1`, qui a produit les chiffres publiés, la cascade n'écrivait
+`match_method = llm_judge` que sur un verdict **positif** ; un non, sincère ou
+dû à une troncature, retombait en `no_match` avec tous les résidus. La première
+vague le montre : `mart_matching_impact` donne 100 % d'accuracy permissive et
+0 % de stricte sur les 1 187 lignes `llm_judge`, alors que l'arbitre a été
+appelé 8 329 fois. Les 7 142 appels restants sont indiscernables des autres
+résidus dans `no_match`. La seconde vague présente la même signature sur ses
+760 lignes `llm_judge`.
 
-La première vague le confirme : `mart_matching_impact` donne 100 % d'accuracy
-permissive et 0 % de stricte sur les 1 187 lignes `llm_judge`, alors que
-l'arbitre a été appelé 8 329 fois. Les 7 142 appels restants — verdicts
-négatifs, sincères ou tronqués — sont indiscernables des autres résidus dans
-`no_match`. La seconde vague présente la même signature sur ses 760 lignes
-`llm_judge`.
+`cascade_v2` trace chaque appel à l'arbitre sous l'une de trois valeurs :
 
-Rendre ces lignes visibles demanderait une valeur de cascade dédiée au verdict
-négatif, ce qui élargirait l'énumération de `match_method` contrôlée par
-`stg_judgments`. Ce n'est pas fait : à corriger avant d'exploiter les chiffres
-de l'étage `llm_judge`.
+| `match_method` | Issue | `ai_correct` |
+| --- | --- | --- |
+| `llm_judge` | `YES` | vrai |
+| `llm_judge_rejected` | `NO` | faux |
+| `llm_judge_failed` | appel en échec, réponse tronquée, vide ou hors lexique | faux |
+
+La part de `llm_judge_failed` borne ce que le juge a pu coûter à l'accuracy
+permissive sans le vouloir ; le dashboard l'affiche en avertissement. Une
+réponse tronquée est classée `llm_judge_failed` même si elle commence par
+`YES` : un verdict interrompu n'est pas un verdict.
+
+**Les chiffres publiés ne bénéficient pas encore de la correction.** Il faut
+rejouer l'étage judge (voir [Étape 6](#étape-6--juger-les-réponses)), puis
+`dbt build`. Aucune inférence n'est à refaire. Le rejeu remplace le fichier
+`judgments-cascade_v1.parquet` de chaque partition par sa version v2 : dbt lit
+tous les parquets d'une partition, et deux versions y doubleraient les lignes.
 
 **2. Les réponses vides restent comptées comme fausses.**
 
@@ -884,7 +896,7 @@ vague.
 ## Tests
 
 ```bash
-python -m pytest -q                                   # 205 tests
+python -m pytest -q                                   # 212 tests
 cd dbt_project && dbt build --profiles-dir .          # 13 modèles, 43 tests
 ```
 

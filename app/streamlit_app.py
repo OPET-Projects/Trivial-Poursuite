@@ -340,10 +340,11 @@ elif page == "Qualité du matching":
             "Mart d'audit : il montre ce que l'accuracy doit à l'appariement plutôt "
             "qu'au modèle. Deux lectures à faire — la part de `choice_letter` en mode "
             "**ouvert**, où le modèle n'a jamais vu les options et peut tomber juste "
-            "par accident ; et la part de `llm_judge`, qui ne compte que les verdicts "
-            "**acceptés** par le juge. Un verdict négatif retombe en `no_match`, donc "
-            "les cas où le juge s'est trompé — il subit la même troncature de "
-            "raisonnement que l'inférence — ne sont pas isolables ici."
+            "par accident ; et la répartition des appels à l'arbitre LLM entre "
+            "`llm_judge` (accepté), `llm_judge_rejected` (refusé) et "
+            "`llm_judge_failed` (verdict illisible : échec, troncature, réponse hors "
+            "YES/NO). Ces deux dernières comptent fausses ; la part de "
+            "`llm_judge_failed` borne ce que le juge a pu coûter au score permissif."
         )
         models = sorted(frame["model_slug"].dropna().unique())
         model = st.selectbox("Modèle", models) if models else None
@@ -379,6 +380,12 @@ elif page == "Qualité du matching":
                 f"{int(leaked['n_answers'].sum())} verdict(s) rendus par "
                 "`choice_letter` en mode ouvert : le modèle n'avait pas les options "
                 "sous les yeux, ces réussites sont accidentelles."
+            )
+        failed = subset[subset["match_method"] == "llm_judge_failed"]
+        if len(failed):
+            st.warning(
+                f"{int(failed['n_answers'].sum())} appel(s) à l'arbitre sans verdict "
+                "lisible (`llm_judge_failed`) : comptés faux, ils ont pu être justes."
             )
         st.dataframe(subset, width="stretch")
 

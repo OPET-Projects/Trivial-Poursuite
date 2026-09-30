@@ -11,18 +11,16 @@
 --    lieu de le noyer dans un total. Une part non négligeable de
 --    `choice_letter` en mode 'open' invalide les chiffres de la variante.
 --
--- 2. `llm_judge`. Le juge est un modèle à raisonnement soumis au même plafond de
---    jetons que l'inférence : quand il est tronqué, il ne rend rien et son
---    verdict tombe à faux, indistinguable d'un vrai non.
---
---    Attention à la lecture : la cascade n'écrit `llm_judge` que sur un verdict
---    positif. Un non — sincère ou dû à la troncature — retombe en `no_match`.
---    Les lignes visibles ici sont donc les verdicts que le juge a *acceptés* ;
---    celles qu'il a rejetées à tort sont noyées dans `no_match` et ne sont pas
---    isolables par `match_method`. L'effet de la troncature du juge est donc une
---    sous-estimation de l'accuracy permissive, sans trace dans ce mart. Rendre
---    ces lignes visibles demanderait une valeur de cascade dédiée au verdict
---    négatif, ce qui élargirait l'énumération de `stg_judgments`.
+-- 2. L'arbitre LLM. Chaque appel au juge laisse une trace sous l'une de trois
+--    valeurs : `llm_judge` (oui, compté juste), `llm_judge_rejected` (non
+--    sincère) et `llm_judge_failed` (appel en échec, réponse tronquée, vide ou
+--    hors lexique YES/NO). Les deux dernières comptent fausses. La part de
+--    `llm_judge_failed` borne ce que le juge a pu coûter à l'accuracy
+--    permissive sans le vouloir ; `no_match` ne contient plus que les résidus
+--    jamais soumis au juge (réponse vide, ou jugement lancé sans arbitre).
+--    Les verdicts écrits par la cascade `cascade_v1` n'ont pas cette
+--    distinction : leurs non et leurs échecs restent confondus dans `no_match`
+--    tant que l'étage judge n'a pas été rejoué.
 --
 -- `unjudged` n'est pas une valeur émise par la cascade : elle marque les
 -- réponses scorables qu'aucun jugement ne couvre encore, l'étage judge étant
