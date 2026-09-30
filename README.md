@@ -886,6 +886,33 @@ vague.
 
 ## Organisation du projet
 
+### Équipe et méthode de travail
+
+Projet réalisé à trois — Théo Gillet, Paul Ragueneau et Eliott Barker — sans
+répartition figée : chaque décision de conception et chaque étage du pipeline
+ont été discutés et construits ensemble.
+
+Le travail a suivi trois principes :
+
+- **Concevoir avant de coder.** Une spécification fixe les décisions et les
+  risques ([`docs/superpowers/specs/`](docs/superpowers/specs/)), un plan la
+  découpe en seize tâches testables ([`docs/superpowers/plans/`](docs/superpowers/plans/)).
+  Le journal de suivi et les revues de chaque tâche sont versionnés sous
+  [`.superpowers/sdd/`](.superpowers/sdd/) : chaque arbitrage y est daté et
+  justifié.
+- **Des contrats entre étages.** Les schémas des fichiers bronze et silver
+  servent d'interface : chaque étage peut être développé et testé sur des
+  fixtures sans attendre l'étage précédent, et sans réseau ni modèle.
+- **Intégrer par pull request.** Les évolutions arrivent sur `main` par PR
+  relue, et la suite de tests doit passer avant fusion.
+
+L'inférence, trop longue pour un seul poste, a été répartie entre les machines
+de l'équipe, modèle par modèle ; les parquets produits ont ensuite été
+rassemblés à la main. La colonne `host` trace le poste de chaque réponse, ce
+qui explique pourquoi les latences sont comparées par poste.
+
+### Arborescence
+
 | Chemin | Rôle |
 | --- | --- |
 | `config.py` | Chemins et paramètres, modèle lu depuis l'environnement |
