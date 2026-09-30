@@ -11,8 +11,6 @@ __pycache__/
 .vscode/
 
 # Couche gold et artefacts dbt
-data/gold/*
-!data/gold/.gitkeep
 dbt_project/target/
 dbt_project/dbt_packages/
 dbt_project/logs/
