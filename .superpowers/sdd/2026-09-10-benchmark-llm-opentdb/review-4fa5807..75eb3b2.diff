@@ -1,0 +1,204 @@
+# Review package: 4fa5807..HEAD
+
+## Commits
+75eb3b2 fix: borner les appels sans progression dans la collecte OpenTDB
+
+## Files changed
+ src/ingest_opentdb.py        | 22 ++++++++++++++++++++++
+ tests/test_ingest_opentdb.py | 38 +++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 59 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/src/ingest_opentdb.py b/src/ingest_opentdb.py
+index a6570fb..f1c9e4f 100644
+--- a/src/ingest_opentdb.py
++++ b/src/ingest_opentdb.py
+@@ -7,20 +7,21 @@ pratique alors même que des questions restent disponibles à un montant
+ inférieur). Demander systématiquement 50 perd donc la queue de chaque
+ catégorie. On dégrade le montant demandé sur ces deux codes avant de
+ conclure à l'épuisement réel de la catégorie.
+ """
+ 
+ from __future__ import annotations
+ 
+ import hashlib
+ import re
+ import sys
++import time
+ from datetime import datetime, timezone
+ from pathlib import Path
+ from typing import Any
+ 
+ import pandas as pd
+ from tqdm import tqdm
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ if str(ROOT) not in sys.path:
+     sys.path.insert(0, str(ROOT))
+@@ -36,20 +37,24 @@ BRONZE_COLUMNS = [
+     "category",
+     "type",
+     "difficulty",
+     "question",
+     "correct_answer",
+     "incorrect_answers",
+     "fetched_at",
+     "batch_id",
+ ]
+ 
++# Nombre d'appels consécutifs sans progression (token invalide, rate limit)
++# toléré avant d'abandonner la catégorie. Borne la boucle de collecte.
++MAX_STALLED_ATTEMPTS = 5
++
+ 
+ def make_question_id(question: str, correct_answer: str) -> str:
+     """Identifiant stable, calculé une seule fois et jamais recalculé.
+ 
+     La normalisation reste minimale — casse et espaces — pour que l'identifiant
+     ne dépende d'aucune décision de nettoyage ultérieure. Sinon un changement
+     dans le silver rendrait orphelines des heures d'inférence.
+     """
+     normalized_q = _SPACES.sub(" ", question.strip().casefold())
+     normalized_a = _SPACES.sub(" ", correct_answer.strip().casefold())
+@@ -77,45 +82,62 @@ def fetch_category(
+     client: Any,
+     token: str,
+     category_id: int,
+     seen: set[str],
+     on_payload=None,
+ ) -> tuple[list[dict[str, Any]], str]:
+     """Vide une catégorie, en dégradant le montant demandé avant d'abandonner."""
+     rows: list[dict[str, Any]] = []
+     ladder_index = 0
+     call_index = 0
++    stalled = 0
+ 
+     while ladder_index < len(config.AMOUNT_LADDER):
+         amount = config.AMOUNT_LADDER[ladder_index]
+         code, questions, payload = client.fetch(amount=amount, category_id=category_id, token=token)
+         call_index += 1
+         batch_id = f"cat{category_id}-{call_index:04d}"
+ 
+         if on_payload is not None:
+             on_payload({"batch_id": batch_id, "category_id": category_id, "payload": payload})
+ 
+         if code == ResponseCode.TOKEN_NOT_FOUND:
++            stalled += 1
++            if stalled >= MAX_STALLED_ATTEMPTS:
++                raise RuntimeError(
++                    f"Catégorie {category_id}: {stalled} appels sans progression, "
++                    f"dernier code de réponse {code}."
++                )
+             token = client.request_token()
+             continue
+ 
+         if code == ResponseCode.RATE_LIMIT:
++            stalled += 1
++            if stalled >= MAX_STALLED_ATTEMPTS:
++                raise RuntimeError(
++                    f"Catégorie {category_id}: {stalled} appels sans progression, "
++                    f"dernier code de réponse {code}."
++                )
++            time.sleep(config.RATE_LIMIT_SECONDS * stalled)
+             continue
+ 
+         if code in (ResponseCode.NO_RESULTS, ResponseCode.TOKEN_EMPTY):
++            stalled = 0
+             ladder_index += 1
+             continue
+ 
+         if code != ResponseCode.SUCCESS:
++            stalled = 0
+             ladder_index += 1
+             continue
+ 
++        stalled = 0
+         for item in questions:
+             row = _to_row(item, batch_id)
+             if row["question_id"] in seen:
+                 continue
+             seen.add(row["question_id"])
+             rows.append(row)
+ 
+     return rows, token
+ 
+ 
+diff --git a/tests/test_ingest_opentdb.py b/tests/test_ingest_opentdb.py
+index 0d4d2dd..df236a7 100644
+--- a/tests/test_ingest_opentdb.py
++++ b/tests/test_ingest_opentdb.py
+@@ -132,37 +132,73 @@ def test_token_not_found_requests_a_new_token_and_continues():
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),
+         ]
+     )
+     rows, token = fetch_category(client, "expired", 9, set())
+     assert client.tokens_issued == 1
+     assert token == "token-1"
+     assert len(rows) == 10
+ 
+ 
+-def test_rate_limit_retries_same_amount():
++def test_rate_limit_retries_same_amount(monkeypatch):
++    monkeypatch.setattr("src.ingest_opentdb.time.sleep", lambda _: None)
+     client = ScriptedClient(
+         script=[
+             (ResponseCode.RATE_LIMIT, 0),
+             (ResponseCode.SUCCESS, 5),
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),
+         ]
+     )
+     rows, _ = fetch_category(client, "token-1", 9, set())
+     assert [call["amount"] for call in client.fetch_calls] == [50, 50, 50, 25, 10, 5, 1]
+     assert len(rows) == 5
+ 
+ 
++def test_persistent_rate_limit_raises_instead_of_looping(monkeypatch):
++    monkeypatch.setattr("src.ingest_opentdb.time.sleep", lambda _: None)
++    client = ScriptedClient(script=[(ResponseCode.RATE_LIMIT, 0)] * 6)
++    with pytest.raises(RuntimeError):
++        fetch_category(client, "token-1", 9, set())
++
++
++def test_persistent_token_not_found_raises_instead_of_looping():
++    client = ScriptedClient(script=[(ResponseCode.TOKEN_NOT_FOUND, 0)] * 6)
++    with pytest.raises(RuntimeError):
++        fetch_category(client, "token-1", 9, set())
++
++
++def test_stall_counter_resets_after_a_success(monkeypatch):
++    monkeypatch.setattr("src.ingest_opentdb.time.sleep", lambda _: None)
++    client = ScriptedClient(
++        script=[
++            (ResponseCode.RATE_LIMIT, 0),
++            (ResponseCode.RATE_LIMIT, 0),
++            (ResponseCode.RATE_LIMIT, 0),
++            (ResponseCode.RATE_LIMIT, 0),
++            (ResponseCode.SUCCESS, 5),
++            (ResponseCode.RATE_LIMIT, 0),
++            (ResponseCode.RATE_LIMIT, 0),
++            (ResponseCode.TOKEN_EMPTY, 0),
++            (ResponseCode.TOKEN_EMPTY, 0),
++            (ResponseCode.TOKEN_EMPTY, 0),
++            (ResponseCode.TOKEN_EMPTY, 0),
++            (ResponseCode.TOKEN_EMPTY, 0),
++        ]
++    )
++    rows, _ = fetch_category(client, "token-1", 9, set())
++    assert len(rows) == 5
++
++
+ def test_duplicates_are_skipped_via_seen_set():
+     client = ScriptedClient(
+         script=[
+             (ResponseCode.SUCCESS, 3),
+             (ResponseCode.SUCCESS, 3),
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),
+             (ResponseCode.TOKEN_EMPTY, 0),

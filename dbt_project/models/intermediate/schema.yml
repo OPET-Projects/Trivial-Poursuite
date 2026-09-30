@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: int_results
+    description: >-
+      Une ligne par (question_id, model_slug, prompt_variant). Table pivot du
+      benchmark : tous les marts en dérivent, aucun ne relit le silver.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [question_id, model_slug, prompt_variant]
+    columns:
+      - name: question_id
+        tests: [not_null]
+      - name: model_slug
+        tests: [not_null]
+      - name: prompt_variant
+        tests: [not_null]
+      - name: is_scorable
+        description: Faux sur erreur d'infrastructure, à exclure du dénominateur.
+        tests: [not_null]
+      - name: is_empty_answer
+        description: >-
+          Réponse vide alors que l'appel a réussi. Signe une troncature du
+          raisonnement, pas une erreur de transport.
+        tests: [not_null]

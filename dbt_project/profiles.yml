@@ -1,0 +1,7 @@
+trivia_benchmark:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "../data/gold/benchmark.duckdb"
+      threads: 4

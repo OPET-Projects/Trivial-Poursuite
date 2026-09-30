@@ -1,5 +1,8 @@
 """Paramètres globaux du pipeline Trivial Poursuite."""
 
+from __future__ import annotations
+
+import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -10,38 +13,46 @@ load_dotenv(PROJECT_ROOT / ".env")
 DATA_DIR = PROJECT_ROOT / "data"
 BRONZE_DIR = DATA_DIR / "bronze"
 SILVER_DIR = DATA_DIR / "silver"
+GOLD_DIR = DATA_DIR / "gold"
 
 BRONZE_CSV = BRONZE_DIR / "questions_raw.csv"
+BRONZE_RESPONSES_DIR = BRONZE_DIR / "_responses"
 INGEST_CHECKPOINT = BRONZE_DIR / "ingest_checkpoint.json"
-SILVER_CLEAN = SILVER_DIR / "questions_clean.parquet"
-SILVER_ENRICHED = SILVER_DIR / "questions_enriched.parquet"
+
+SILVER_QUESTIONS = SILVER_DIR / "questions.parquet"
+SILVER_ANSWERS_DIR = SILVER_DIR / "answers"
+SILVER_JUDGMENTS_DIR = SILVER_DIR / "judgments"
+SILVER_RUNS_DIR = SILVER_DIR / "runs"
+
+GOLD_DUCKDB = GOLD_DIR / "benchmark.duckdb"
 
 # OpenTDB
 OPENTDB_BASE = "https://opentdb.com"
-OPENTDB_BATCH_SIZE = 50
+OPENTDB_ENCODING = "base64"
+AMOUNT_LADDER = [50, 25, 10, 5, 1]
 RATE_LIMIT_SECONDS = 5.1
 HTTP_TIMEOUT_SECONDS = 30
 MAX_RETRIES = 8
 
-# Échantillon LLM
-SAMPLE_SIZE = 400
+# Échantillonnage, réservé aux smoke tests
+SAMPLE_SIZE = 0
 SAMPLE_SEED = 42
 
 # LM Studio
-MODEL_NAME = "google/gemma-4-12b-qat"
-LMSTUDIO_TIMEOUT_SECONDS = 180
-LLM_TEMPERATURE = 0
-LLM_MAX_TOKENS = 64
+MODEL_NAME = os.environ.get("LLM_MODEL", "google/gemma-4-26b-a4b-qat")
+JUDGE_MODEL_NAME = os.environ.get("JUDGE_MODEL", MODEL_NAME)
+LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234").rstrip("/")
+LMSTUDIO_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "180"))
+# "none" aligne les modèles à raisonnement sur le protocole des modèles qui
+# n'en ont pas ; toute autre valeur rend les runs incomparables entre eux.
+LLM_REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "none")
+LLM_TEMPERATURE = 0.0
+LLM_MAX_TOKENS = 256
+LLM_MAX_ATTEMPTS = 3
 
-# Prompt standardisé (tracé dans le dataset)
-PROMPT_ID = "strict_verbatim_v1"
-SYSTEM_PROMPT = (
-    "You are a trivia answering engine. "
-    "Reply with the answer only. "
-    "No explanation, no extra punctuation, no markdown, no quotes. "
-    "If the question is multiple choice, copy one of the given options verbatim. "
-    "If the question is true/false, reply with True or False only."
-)
+# Écriture partitionnée
+FLUSH_EVERY = 150
 
 # Scoring
 FUZZY_RATIO_THRESHOLD = 90
+JUDGMENT_VERSION = "cascade_v1"

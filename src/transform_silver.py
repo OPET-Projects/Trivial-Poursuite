@@ -1,12 +1,21 @@
-"""Nettoyage bronze → silver/questions_clean.parquet."""
+"""Nettoyage bronze → silver/questions.parquet.
+
+L'ordre des options est mélangé avec un générateur seedé par question_id.
+Trié alphabétiquement, l'ordre plaçait toujours False en première position sur
+les booléens et ordonnait les réponses numériques par magnitude : le biais de
+position bien documenté des modèles devenait alors corrélé au contenu, donc non
+uniforme selon la catégorie.
+"""
 
 from __future__ import annotations
 
 import ast
-import hashlib
 import html
 import json
+import random
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -16,97 +25,143 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+from src.io_utils import atomic_write_dataframe
+
+_SPACES = re.compile(r"\s+")
+_NUMERIC = re.compile(r"^(?=.*\d)[\d\s.,%/+-]+$")
+
+SILVER_COLUMNS = [
+    "question_id",
+    "category",
+    "category_group",
+    "category_name",
+    "type",
+    "difficulty",
+    "question",
+    "correct_answer",
+    "incorrect_answers",
+    "choices",
+    "correct_answer_position",
+    "n_choices",
+    "correct_answer_norm",
+    "answer_is_numeric",
+    "question_len",
+    "answer_len",
+    "cleaned_at",
+]
 
 
-def _unescape(value: object) -> str:
+def unescape_text(value: object) -> str:
+    """Déplie les entités HTML, y compris doublement encodées."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
-    return html.unescape(str(value)).strip()
+    text = str(value)
+    for _ in range(3):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return _SPACES.sub(" ", text).strip()
 
 
-def _parse_incorrect(value: object) -> list[str]:
+def split_category(label: str) -> tuple[str, str]:
+    if ":" in label:
+        group, name = label.split(":", 1)
+        return group.strip(), name.strip()
+    return "General", label.strip()
+
+
+def parse_incorrect(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [unescape_text(item) for item in value]
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return []
-    if isinstance(value, list):
-        return [_unescape(item) for item in value]
     text = str(value).strip()
     if not text:
         return []
-    parsed: object
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         parsed = ast.literal_eval(text)
     if not isinstance(parsed, list):
-        return [_unescape(parsed)]
-    return [_unescape(item) for item in parsed]
+        return [unescape_text(parsed)]
+    return [unescape_text(item) for item in parsed]
 
 
-def make_question_id(category: str, question: str, correct_answer: str) -> str:
-    payload = f"{category}\n{question}\n{correct_answer}".encode("utf-8")
-    return hashlib.sha1(payload).hexdigest()
+def shuffled_choices(question_id: str, correct: str, incorrect: list[str]) -> list[str]:
+    """Ordre reproductible et décorrélé du contenu.
+
+    Les propositions en doublon exact sont écartées : OpenTDB contient des
+    lignes où une mauvaise réponse reprend mot pour mot la bonne, ce qui
+    rendrait `correct_answer_position` ambigu.
+    """
+    choices = [correct]
+    for answer in incorrect:
+        if answer not in choices:
+            choices.append(answer)
+    random.Random(question_id).shuffle(choices)
+    return choices
 
 
-def _all_answers(correct: str, incorrect: list[str]) -> list[str]:
-    unique = []
-    seen: set[str] = set()
-    for answer in [correct, *incorrect]:
-        if answer and answer not in seen:
-            unique.append(answer)
-            seen.add(answer)
-    return sorted(unique, key=lambda item: item.casefold())
+def normalize_answer(value: str) -> str:
+    import unicodedata
+
+    text = unicodedata.normalize("NFKD", value)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^\w\s]", " ", text.casefold())
+    return _SPACES.sub(" ", text).strip()
 
 
 def clean_questions(df: pd.DataFrame) -> pd.DataFrame:
-    cleaned = pd.DataFrame(
-        {
-            "category": df["category"].map(_unescape),
-            "type": df["type"].map(lambda v: _unescape(v).lower()),
-            "difficulty": df["difficulty"].map(lambda v: _unescape(v).lower()),
-            "question": df["question"].map(_unescape),
-            "correct_answer": df["correct_answer"].map(_unescape),
-            "incorrect_answers": df["incorrect_answers"].map(_parse_incorrect),
-        }
-    )
-    cleaned = cleaned[cleaned["question"].str.len() > 0]
-    cleaned = cleaned[cleaned["correct_answer"].str.len() > 0]
-    cleaned["question_id"] = [
-        make_question_id(row.category, row.question, row.correct_answer)
-        for row in cleaned.itertuples(index=False)
-    ]
-    cleaned["all_answers"] = [
-        _all_answers(row.correct_answer, row.incorrect_answers)
-        for row in cleaned.itertuples(index=False)
-    ]
-    cleaned = cleaned.drop_duplicates(subset=["question_id"]).reset_index(drop=True)
-    return cleaned[
-        [
-            "question_id",
-            "category",
-            "type",
-            "difficulty",
-            "question",
-            "correct_answer",
-            "incorrect_answers",
-            "all_answers",
-        ]
-    ]
+    records = []
+    now = datetime.now(timezone.utc).isoformat()
+
+    for row in df.to_dict(orient="records"):
+        question = unescape_text(row.get("question"))
+        correct = unescape_text(row.get("correct_answer"))
+        if not question or not correct:
+            continue
+
+        category = unescape_text(row.get("category"))
+        group, name = split_category(category)
+        incorrect = parse_incorrect(row.get("incorrect_answers"))
+        question_id = str(row["question_id"])
+        choices = shuffled_choices(question_id, correct, incorrect)
+
+        records.append(
+            {
+                "question_id": question_id,
+                "category": category,
+                "category_group": group,
+                "category_name": name,
+                "type": unescape_text(row.get("type")).lower(),
+                "difficulty": unescape_text(row.get("difficulty")).lower(),
+                "question": question,
+                "correct_answer": correct,
+                "incorrect_answers": incorrect,
+                "choices": choices,
+                "correct_answer_position": choices.index(correct),
+                "n_choices": len(choices),
+                "correct_answer_norm": normalize_answer(correct),
+                "answer_is_numeric": bool(_NUMERIC.match(correct.strip())),
+                "question_len": len(question),
+                "answer_len": len(correct),
+                "cleaned_at": now,
+            }
+        )
+
+    cleaned = pd.DataFrame(records, columns=SILVER_COLUMNS)
+    return cleaned.drop_duplicates(subset=["question_id"]).reset_index(drop=True)
 
 
 def run_transform() -> Path:
     if not config.BRONZE_CSV.exists():
-        raise FileNotFoundError(
-            f"Couche bronze introuvable: {config.BRONZE_CSV}. Lancez d'abord l'ingest."
-        )
-    config.SILVER_DIR.mkdir(parents=True, exist_ok=True)
+        raise FileNotFoundError(f"Couche bronze introuvable: {config.BRONZE_CSV}")
     raw = pd.read_csv(config.BRONZE_CSV)
     cleaned = clean_questions(raw)
-    cleaned.to_parquet(config.SILVER_CLEAN, index=False)
-    print(
-        f"[silver] {len(raw)} brutes → {len(cleaned)} propres "
-        f"({len(raw) - len(cleaned)} doublons/vides retirés) → {config.SILVER_CLEAN}"
-    )
-    return config.SILVER_CLEAN
+    atomic_write_dataframe(cleaned, config.SILVER_QUESTIONS, "parquet")
+    print(f"[silver] {len(raw)} brutes → {len(cleaned)} propres → {config.SILVER_QUESTIONS}")
+    return config.SILVER_QUESTIONS
 
 
 def main() -> None:

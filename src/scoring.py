@@ -1,45 +1,71 @@
-"""Comparaison de la réponse du modèle avec la bonne réponse."""
+"""Primitives de comparaison de réponses.
+
+Ce module ne rend aucun verdict : il fournit les briques que la cascade de
+jugement assemble, et c'est elle qui décide de l'ordre des étages et du
+`match_method` retenu.
+
+Deux règles de la version précédente disparaissent. La sous-chaîne à quatre
+caractères minimum était trop généreuse : « Paris » validait « Paris Hilton ».
+Et `fuzz.ratio` cède la place à `token_set_ratio`, qui encaisse l'ordre des
+mots et les qualificatifs surnuméraires.
+"""
 
 from __future__ import annotations
 
-import html
 import re
-import sys
+import string
 import unicodedata
-from pathlib import Path
 
 from rapidfuzz import fuzz
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-import config
-
 _TRUE = {"true", "yes", "y", "t", "1", "vrai", "oui"}
 _FALSE = {"false", "no", "n", "f", "0", "faux", "non"}
+_LEADING_ARTICLES = ("the ", "a ", "an ")
 _PUNCT = re.compile(r"[^\w\s]")
 _SPACES = re.compile(r"\s+")
 
+# Un modèle contraint désigne son option de bien des façons. Les formes
+# retenues viennent d'une décision utilisateur — « B », « B. », « B) »,
+# « (B) », « Answer: B » — élargies aux tournures voisines qui coûtent zéro
+# faux positif : le motif est ancré et n'accepte qu'un seul caractère utile,
+# donc aucune réponse en prose ne peut y entrer.
+_REF_PREFIX = r"(?:(?:the\s+)?(?:answer|option|choice|number|réponse)\s*(?:is\s*)?[:.\-]?\s*)?"
+_LETTER_REF = re.compile(rf"^{_REF_PREFIX}\(?([a-z])\)?[.):]?$", re.IGNORECASE)
+_RANK_REF = re.compile(rf"^{_REF_PREFIX}\(?(\d{{1,2}})\)?[.):]?$", re.IGNORECASE)
+
+# Au-delà de cette longueur, aucune des formes supportées n'est possible : on
+# évite de passer une dissertation à deux regex.
+_MAX_REFERENCE_LENGTH = 32
+
 
 def normalize(text: object) -> str:
+    """Ramène un texte à sa forme comparable.
+
+    Le dépliage des entités HTML n'est volontairement pas fait ici : l'étage
+    silver s'en charge déjà, et le refaire masquerait une régression amont.
+    """
     if text is None:
         return ""
-    value = html.unescape(str(text)).strip()
-    value = unicodedata.normalize("NFKD", value)
+    value = unicodedata.normalize("NFKD", str(text))
     value = "".join(char for char in value if not unicodedata.combining(char))
-    value = value.casefold()
-    value = _PUNCT.sub(" ", value)
-    return _SPACES.sub(" ", value).strip()
+    value = _PUNCT.sub(" ", value.casefold())
+    value = _SPACES.sub(" ", value).strip()
+    for article in _LEADING_ARTICLES:
+        if value.startswith(article):
+            return value[len(article):].strip()
+    return value
 
 
-def _boolean_label(text: str) -> bool | None:
+def boolean_label(text: str) -> bool | None:
+    """Ramène une réponse à un booléen, ou None si elle n'en désigne aucun."""
     token = normalize(text)
+    if not token:
+        return None
     if token in _TRUE:
         return True
     if token in _FALSE:
         return False
-    first = token.split(" ", 1)[0] if token else ""
+    first = token.split(" ", 1)[0]
     if first in _TRUE:
         return True
     if first in _FALSE:
@@ -47,34 +73,39 @@ def _boolean_label(text: str) -> bool | None:
     return None
 
 
-def is_ai_correct(
-    ai_answer: object,
-    correct_answer: object,
-    question_type: str,
-    all_answers: list[str] | None = None,
-) -> bool:
-    predicted = normalize(ai_answer)
-    expected = normalize(correct_answer)
-    if not predicted or not expected:
-        return False
+def resolve_choice_reference(answer: str, choices: list[str]) -> str | None:
+    """Résout une réponse qui désigne une option par sa lettre ou son rang.
 
-    if question_type == "boolean":
-        pred_bool = _boolean_label(predicted)
-        exp_bool = _boolean_label(expected)
-        if pred_bool is not None and exp_bool is not None:
-            return pred_bool is exp_bool
+    Renvoie None si la réponse ne désigne rien, ou désigne hors du tableau :
+    l'appelant enchaîne alors sur l'étage suivant de la cascade.
+    """
+    candidate = str(answer).strip()
+    if not candidate or len(candidate) > _MAX_REFERENCE_LENGTH:
+        return None
 
-    if predicted == expected:
-        return True
-    if expected in predicted or predicted in expected:
-        # évite les sous-chaînes trop courtes ("a", "the")
-        if min(len(predicted), len(expected)) >= 4:
-            return True
+    letter = _LETTER_REF.match(candidate)
+    if letter:
+        index = string.ascii_lowercase.index(letter.group(1).lower())
+        return choices[index] if index < len(choices) else None
 
-    if all_answers:
-        matches = [ans for ans in all_answers if normalize(ans) == predicted]
-        if len(matches) == 1:
-            return normalize(matches[0]) == expected
+    rank = _RANK_REF.match(candidate)
+    if rank:
+        index = int(rank.group(1)) - 1
+        return choices[index] if 0 <= index < len(choices) else None
 
-    ratio = fuzz.ratio(predicted, expected)
-    return ratio >= config.FUZZY_RATIO_THRESHOLD
+    return None
+
+
+def matches_single_choice(answer_norm: str, choices: list[str]) -> str | None:
+    """Renvoie l'option désignée sans ambiguïté, sinon None.
+
+    Deux options qui se normalisent pareil rendent le verdict indécidable :
+    on préfère ne rien conclure plutôt que de tirer au sort.
+    """
+    hits = [choice for choice in choices if normalize(choice) == answer_norm]
+    return hits[0] if len(hits) == 1 else None
+
+
+def fuzzy_score(a: str, b: str) -> float:
+    """Similarité 0-100. Le seuil et la règle numérique relèvent de la cascade."""
+    return float(fuzz.token_set_ratio(a, b))

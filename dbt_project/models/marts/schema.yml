@@ -1,0 +1,188 @@
+version: 2
+
+models:
+  - name: mart_model_performance
+    description: >-
+      Une ligne par modèle. Trois dénominateurs coexistent : `n_scorable`
+      (l'appel a abouti), `n_judged` (la cascade a rendu un verdict) et
+      `n_scorable - n_empty` (le modèle a réellement produit du texte).
+      `accuracy_permissive` compte les réponses vides comme fausses ;
+      `accuracy_permissive_excl_empty` les retire. Lire l'écart entre les deux
+      avant toute conclusion : il mesure ce que la troncature coûte au modèle.
+    columns:
+      - name: model_slug
+        tests: [unique, not_null]
+      - name: n_empty
+        description: >-
+          Réponses vides malgré un appel réussi. Signent une troncature du
+          raisonnement, pas une panne. Un `n_empty` élevé rend
+          `accuracy_permissive` pessimiste.
+        tests: [not_null]
+      - name: accuracy_strict
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+      - name: accuracy_permissive
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+      - name: accuracy_permissive_excl_empty
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: mart_performance_by_category
+    description: >-
+      Accuracy par catégorie, avec l'écart à la moyenne du modèle. Les deux
+      termes de l'écart sont calculés sur le même périmètre `is_scorable`.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [model_slug, category]
+    columns:
+      - name: model_slug
+        tests: [not_null]
+      - name: category
+        tests: [not_null]
+      - name: accuracy_permissive
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: mart_performance_by_difficulty
+    description: >-
+      Confronte la difficulté déclarée par OpenTDB au taux de réussite observé.
+      `question_type` est dans la clé parce que le plancher de hasard diffère :
+      25 % en `multiple` à quatre options, 50 % en `boolean`.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              [model_slug, prompt_variant, difficulty, question_type]
+    columns:
+      - name: difficulty
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["easy", "medium", "hard"]
+      - name: accuracy_permissive
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: mart_prompt_performance
+    description: >-
+      Effet du prompt à modèle constant. L'écart p1/p3 sépare la reconnaissance
+      de la restitution, l'écart p2/p3 isole l'apport du prompt seul.
+      `answer_len_avg` n'est pas comparable entre modes depuis le passage de p1
+      aux réponses lettrées : une réponse juste y fait un caractère.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [model_slug, prompt_variant]
+    columns:
+      - name: mode
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["constrained", "open"]
+      - name: accuracy_permissive
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: mart_latency
+    description: >-
+      Latence cloisonnée par poste : comparer des temps entre matériels
+      différents ne mesure rien. `tokens_per_second` est un débit agrégé
+      (somme des jetons sur somme des temps), pas une moyenne de débits.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [model_slug, host, hardware, prompt_variant]
+    columns:
+      - name: response_time_median
+        tests: [not_null]
+
+  - name: mart_question_hardness
+    description: >-
+      Difficulté réelle d'une question, toutes tentatives confondues.
+      `failed_by_everyone` ne compte que les verdicts rendus : une question non
+      jugée n'est pas une question ratée.
+    columns:
+      - name: question_id
+        tests: [unique, not_null]
+      - name: success_rate
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: mart_matching_impact
+    description: >-
+      Ventilation des verdicts par étage de la cascade. Mart d'audit : il montre
+      ce que l'accuracy doit à l'appariement plutôt qu'au modèle. Deux lectures
+      attendues — la part de `choice_letter` en mode 'open', où le modèle n'a
+      jamais vu les options et où une réponse d'un caractère peut tomber juste
+      par accident ; et la part de `llm_judge`, qui ne compte que les verdicts
+      que le juge a acceptés. Le juge subit la même troncature de raisonnement
+      que l'inférence, mais un verdict négatif — sincère ou tronqué — retombe en
+      `no_match` : ces lignes-là ne sont pas isolables par `match_method`, et
+      l'effet est une sous-estimation de l'accuracy permissive.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [model_slug, prompt_variant, match_method]
+    columns:
+      - name: match_method
+        description: >-
+          Étage ayant rendu le verdict. `unjudged` n'est pas émis par la
+          cascade : il marque les réponses scorables qu'aucun jugement ne
+          couvre encore, l'étage judge étant rejouable séparément.
+        tests: [not_null]
+      - name: share
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: mart_position_bias
+    description: >-
+      Distribution des positions choisies en mode contraint. Les options étant
+      mélangées par un tirage seedé sur `question_id`, une distribution non
+      uniforme est un biais du modèle et non un artefact du corpus. Les réponses
+      dont la position n'a pas pu être résolue sont conservées avec
+      `chosen_position` nul : les filtrer masquerait le cas où le modèle cesse
+      de respecter le format de réponse.
+    columns:
+      - name: model_slug
+        tests: [not_null]
+      - name: chosen_share
+        tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: mart_errors
+    description: >-
+      Erreurs d'infrastructure par poste et par run. Ne contient que les lignes
+      non scorables : une réponse vide avec `status = 'ok'` est une troncature,
+      pas une panne, et relève de `n_empty` des marts d'accuracy.
+    columns:
+      - name: n_errors
+        tests: [not_null]

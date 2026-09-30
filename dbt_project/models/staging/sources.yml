@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: silver
+    description: Parquets produits par les étages silver du pipeline Python.
+    tables:
+      - name: questions
+        description: Une ligne par question OpenTDB nettoyée.
+        meta:
+          external_location: "read_parquet('../data/silver/questions.parquet')"
+
+      # `hive_partitioning = false` est passé explicitement, pas laissé au défaut.
+      # Les chemins encodent `model=` et `prompt_variant=`, mais `prompt_variant`
+      # est déjà une colonne à l'intérieur des fichiers. DuckDB auto-détecte la
+      # disposition hive : au défaut il ajoute une colonne `model` issue du
+      # chemin et fusionne silencieusement les deux `prompt_variant`. Le chemin
+      # ne doit jamais faire autorité sur le contenu, c'est le fichier qui porte
+      # la vérité. `union_by_name` protège d'un ajout de colonne entre deux runs.
+      - name: answers
+        description: Une ligne par (question, modèle, variante de prompt).
+        meta:
+          external_location: >-
+            read_parquet('../data/silver/answers/**/*.parquet',
+            union_by_name = true, hive_partitioning = false)
+
+      - name: judgments
+        description: Verdict de la cascade, rejouable sans réinférence.
+        meta:
+          external_location: >-
+            read_parquet('../data/silver/judgments/**/*.parquet',
+            union_by_name = true, hive_partitioning = false)
